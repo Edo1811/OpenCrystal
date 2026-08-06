@@ -451,15 +451,38 @@ const UI = (() => {
           s.mouse.left = false; s.mouse.right = false;
           return;                       // the drill keeps running with the cursor out
         }
-        s.paused = !locked;
+        /* In a room, losing the pointer never pauses. Pausing would freeze you
+           in place for the other player and stall the tick accumulator, and
+           there is nothing to pause anyway — their client keeps running. Input
+           is dropped instead, so you stand still rather than walking blind. */
+        const inRoom = this.mode === 'freeplay' && this.peer && this.peer.ready;
+        s.paused = inRoom ? false : !locked;
         s.last = performance.now();
+        s.acc = 0;
         $('overlay').style.display = locked ? 'none' : 'flex';
         if (!locked) {
           s.mouse.left = false; s.mouse.right = false;
+          s.keys.clear();
           s.sprintLatch = false;
           if (navigator.keyboard && navigator.keyboard.unlock) navigator.keyboard.unlock();
           if (document.fullscreenElement && document.exitFullscreen)
             document.exitFullscreen().catch(() => {});
+        }
+      });
+
+      /* A hidden tab gets no animation frames — that is the browser, not
+         something this can work around. What it can do is not pretend the gap
+         never happened: drop the backlog on the way back in so you resume
+         where you are instead of fast-forwarding through 30 seconds of held
+         keys, and let the other side see you go still rather than teleport. */
+      document.addEventListener('visibilitychange', () => {
+        if (document.hidden) {
+          s.keys.clear();
+          s.mouse.left = false; s.mouse.right = false;
+          s.sprintLatch = false;
+        } else {
+          s.last = performance.now();
+          s.acc = 0;
         }
       });
 
@@ -785,7 +808,11 @@ const UI = (() => {
       if (this.peer) this.peer.close();
       const peer = new Net.Peer({
         onState: (state, detail) => this.onNetState(state, detail),
-        onSnapshot: snap => this.session.onSnapshot('peer', snap)
+        onSnapshot: snap => this.session.onSnapshot('peer', snap),
+        onEvent: msg => {
+          this.session.onRemoteEvent(msg);
+          this.buildHotbar();
+        }
       });
       this.peer = peer;
       return peer;

@@ -327,10 +327,14 @@ const Game = (() => {
   }
 
   class Pearl {
-    constructor(x, y, z, vx, vy, vz) {
+    /* A remote pearl is drawn and flies, but never teleports anyone and never
+       sets off a crystal. Its thrower owns both of those, and their client
+       will tell us what happened. */
+    constructor(x, y, z, vx, vy, vz, remote) {
       this.x = x; this.y = y; this.z = z;
       this.vx = vx; this.vy = vy; this.vz = vz;
       this.alive = true; this.age = 0;
+      this.remote = !!remote;
     }
   }
 
@@ -631,6 +635,8 @@ const Game = (() => {
       this.remotes = new Map();      // id -> RemotePlayer
       this.interpDelay = 100;        // ms of playback delay on remote players
       this.netTick = 0;
+      this.entitySeq = 0;            // ids are prefixed by role, so they never collide
+      this.applyingRemote = false;   // stops an applied event echoing back out
       // ---- presentation state. None of this feeds back into the simulation:
       // the tilt, the shake and the particles are readouts you can feel.
       this.particles = [];
@@ -670,13 +676,18 @@ const Game = (() => {
       } else {
         this.player.spawnYaw = 0;
       }
-      this.reset();
+      // quiet: entering a mode is not a mid-match rebuild, and broadcasting it
+      // would hand the other player an arena wipe they never asked for
+      this.reset(true);
     }
 
     /* Rebuilds the arena from its snapshot, clears every entity and wipes the
        run. Bound to a key rather than running on a timer, so a cratered floor
        stays cratered until you decide otherwise. */
-    reset() {
+    /* R Shift rebuilds the arena. In a room that has to happen on both sides
+       or the two worlds part ways permanently, so it travels. */
+    reset(fromRemote) {
+      if (!fromRemote && !this.applyingRemote) this.netSend({ t: 'rs' });
       this.crystals.length = 0; this.pearls.length = 0; this.explosions.length = 0;
       this.world.data.set(this.world.original);
       this.world.charges.clear();
@@ -697,6 +708,80 @@ const Game = (() => {
       this.bobPhase = 0; this.bobAmt = 0;
       this.dummyPopAt = -1e9;
       this.refill = this.mode === 'refill' ? new Refill(this) : null;
+    }
+
+    /* ------------------------------------------------------------------
+       Multiplayer events.
+
+       The rule everywhere below: whoever caused a thing decides what it did,
+       and the other side applies the answer rather than recomputing it. Two
+       clients cannot be relied on to hold identical worlds — my obsidian and
+       your explosion can land in either order depending on which machine you
+       ask — so anything derived from world state travels as a result, not as
+       an instruction to go and work it out again.
+       ------------------------------------------------------------------ */
+    netSend(msg) {
+      if (this.mode !== 'freeplay' || !this.net || !this.net.ready) return;
+      this.net.sendEvent(msg);
+    }
+
+    nextId() {
+      return (this.net && this.net.role === 'guest' ? 'g' : 'h') + (++this.entitySeq);
+    }
+
+    findCrystal(id) {
+      for (const c of this.crystals) if (c.id === id) return c;
+      return null;
+    }
+
+    /* Applied to events that arrived from the other player. applyingRemote
+       stops the handlers below from echoing them straight back out. */
+    onRemoteEvent(m) {
+      if (this.mode !== 'freeplay') return;
+      this.applyingRemote = true;
+      try {
+        switch (m.t) {
+          case 'bs': {
+            this.world.set(m.x, m.y, m.z, m.id);
+            if (m.id === AIR) this.world.charges.delete(m.x + ',' + m.y + ',' + m.z);
+            break;
+          }
+          case 'ac':
+            this.world.charges.set(m.x + ',' + m.y + ',' + m.z, m.n);
+            break;
+          case 'cp': {
+            if (this.findCrystal(m.id)) break;
+            const c = new Crystal(m.bx, m.by, m.bz);
+            c.id = m.id;
+            c.onBlock = m.bx + ',' + m.by + ',' + m.bz;
+            this.crystals.push(c);
+            break;
+          }
+          case 'ex':
+            this.applyExplosion(m);
+            break;
+          case 'pt':
+            this.pearls.push(new Pearl(m.x, m.y, m.z, m.vx, m.vy, m.vz, true));
+            break;
+          case 'rs':
+            this.reset(true);
+            break;
+        }
+      } finally { this.applyingRemote = false; }
+    }
+
+    /* An explosion the other player caused. The blast itself is replayed for
+       damage readout and effects, but which crystals it took and which blocks
+       it broke are read off the message: those two are the parts that would
+       otherwise drift, since they depend on a world state we cannot promise is
+       identical at that instant. */
+    applyExplosion(m) {
+      for (const id of m.kill || []) {
+        const c = this.findCrystal(id);
+        if (c) c.alive = false;
+      }
+      this.explode(m.x, m.y, m.z, m.power, { gone: m.gone || [] });
+      this.crystals = this.crystals.filter(c => c.alive);
     }
 
     // -------- targeting
@@ -826,6 +911,7 @@ const Game = (() => {
       if (!this.dummy.deadUntil && boxIntersects(b, this.dummy.box)) return false;
       for (const c of this.crystals) if (c.alive && boxIntersects(b, c.box)) return false;
       this.world.set(x, y, z, id);
+      this.netSend({ t: 'bs', x, y, z, id });
       const face = {
         x: x + 0.5 + hit.face[0] * 0.5,
         y: y + 0.5 + hit.face[1] * 0.5,
@@ -847,6 +933,7 @@ const Game = (() => {
       const charges = this.world.charges.get(key) || 0;
       if (this.player.held === 'glowstone' && charges < MC.ANCHOR_MAX_CHARGES) {
         this.world.charges.set(key, charges + 1);
+        this.netSend({ t: 'ac', x, y, z, n: charges + 1 });
         return true;
       }
       if (charges > 0) { this.detonateAnchor(x, y, z); return true; }
@@ -862,7 +949,12 @@ const Game = (() => {
         this.stats.cycles.push(performance.now() - this.stats.cycleStart);
         this.stats.cycleStart = null; this.stats.cycleBlock = null;
       }
-      this.explode(x + 0.5, y + 0.5, z + 0.5, MC.POWER_ANCHOR);
+      const res = this.explode(x + 0.5, y + 0.5, z + 0.5, MC.POWER_ANCHOR);
+      if (!this.applyingRemote && res)
+        this.netSend({
+          t: 'ex', x: x + 0.5, y: y + 0.5, z: z + 0.5, power: MC.POWER_ANCHOR,
+          kill: res.kill, gone: res.gone.concat([x + ',' + y + ',' + z])
+        });
       this.stats.selfDamages.push(this.selfDamageLast);
       // the rep is judged on what the blast would have done to you, not on
       // whether you pressed the keys in the expected order
@@ -890,8 +982,10 @@ const Game = (() => {
       if (!this.dummy.deadUntil && boxIntersects(col, this.dummy.box)) return false;
       for (const c of this.crystals) if (c.alive && boxIntersects(col, c.box)) return false;
       const c = new Crystal(bx, by, bz);
+      c.id = this.nextId();
       c.onBlock = bx + ',' + by + ',' + bz;
       this.crystals.push(c);
+      this.netSend({ t: 'cp', id: c.id, bx, by, bz });
       this.stats.flickErrors.push(this.flickError({ x: bx + 0.5, y: by + 1, z: bz + 0.5 }));
       return true;
     }
@@ -909,6 +1003,7 @@ const Game = (() => {
       let vz = (d.z + g() * inacc) * MC.PEARL_POWER;
       vx += p.vx; vz += p.vz; vy += p.onGround ? 0 : p.vy;   // throws inherit your motion
       this.pearls.push(new Pearl(e.x, e.y - 0.1, e.z, vx, vy, vz));
+      this.netSend({ t: 'pt', x: e.x, y: e.y - 0.1, z: e.z, vx, vy, vz });
       return true;
     }
 
@@ -920,11 +1015,17 @@ const Game = (() => {
         this.stats.cycles.push(performance.now() - this.stats.cycleStart);
         this.stats.cycleStart = null; this.stats.cycleBlock = null;
       }
-      this.explode(crystal.x, crystal.y, crystal.z, MC.POWER_CRYSTAL);
+      const res = this.explode(crystal.x, crystal.y, crystal.z, MC.POWER_CRYSTAL);
+      if (!this.applyingRemote && res)
+        this.netSend({
+          t: 'ex', x: crystal.x, y: crystal.y, z: crystal.z, power: MC.POWER_CRYSTAL,
+          kill: [crystal.id].concat(res.kill), gone: res.gone
+        });
     }
 
-    explode(cx, cy, cz, power) {
+    explode(cx, cy, cz, power, opts) {
       const w = this.world;
+      const remote = !!(opts && opts.gone);
       const isSolid = (x, y, z) => w.solid(x, y, z);
       this.selfDamageLast = 0;
       this.explosions.push(this.makeExplosion(cx, cy, cz, power));
@@ -968,28 +1069,48 @@ const Game = (() => {
       const falloff = Math.max(0, 1 - pdist / (2 * power));
       this.shake = Math.min(1, this.shake + falloff * falloff * (power / 6));
 
-      // ---- other crystals caught in the blast
-      for (const c of this.crystals) {
-        if (!c.alive) continue;
-        const dd = Math.hypot(c.x - cx, c.y - cy, c.z - cz);
-        if (dd > 0.01 && dd <= 2 * power) {
-          if (this.settings.crystalChaining) this.detonate(c);
-          else c.alive = false;
+      // ---- other crystals caught in the blast. A remote blast already told us
+      // which ones it took; recomputing here could only ever disagree with it.
+      const kill = [];
+      if (!remote) {
+        // sorted by id, or two clients holding the same crystals in different
+        // array orders would walk the chain in a different sequence
+        const near = this.crystals.slice()
+          .sort((a, b) => (a.id || '') < (b.id || '') ? -1 : 1);
+        for (const c of near) {
+          if (!c.alive) continue;
+          const dd = Math.hypot(c.x - cx, c.y - cy, c.z - cz);
+          if (dd > 0.01 && dd <= 2 * power) {
+            // chained crystals each broadcast their own blast; ones killed
+            // without chaining have no blast of their own, so they ride along
+            if (this.settings.crystalChaining) this.detonate(c);
+            else { c.alive = false; kill.push(c.id); }
+          }
         }
       }
 
       // ---- blocks
-      if (this.settings.blockDestruction) {
-        const gone = MC.destroyedBlocks(cx, cy, cz, power,
+      const gone = [];
+      if (remote) {
+        for (const key of opts.gone) {
+          const [x, y, z] = key.split(',').map(Number);
+          w.set(x, y, z, AIR);
+          w.charges.delete(key);
+        }
+      } else if (this.settings.blockDestruction) {
+        const set = MC.destroyedBlocks(cx, cy, cz, power,
           (x, y, z) => w.blastRes(x, y, z),
           (x, y, z) => { const id = w.get(x, y, z); return id !== AIR && id !== BEDROCK; });
         const now = performance.now();
-        for (const key of gone) {
+        for (const key of set) {
           const [x, y, z] = key.split(',').map(Number);
           w.set(x, y, z, AIR);
+          w.charges.delete(key);
+          gone.push(key);
           if (this.settings.autoRepair) w.repairQueue.push({ x, y, z, at: now + 1500 });
         }
       }
+      return { gone, kill };
     }
 
     // -------- presentation
@@ -1176,9 +1297,14 @@ const Game = (() => {
           const t = rayBox(pe.x, pe.y, pe.z, pe.vx, pe.vy, pe.vz, c.box);
           if (t >= 0 && t <= 1) { hitCrystal = c; break; }
         }
-        if (hitCrystal) { pe.alive = false; this.detonate(hitCrystal); continue; }
+        if (hitCrystal) {
+          pe.alive = false;
+          if (!pe.remote) this.detonate(hitCrystal);
+          continue;
+        }
         if (MC.rayObstructed(pe.x, pe.y, pe.z, nx, ny, nz, (x, y, z) => this.world.solid(x, y, z))) {
           pe.alive = false;
+          if (pe.remote) continue;
           p.x = nx; p.y = Math.max(ny, 0); p.z = nz;
           p.vx = p.vy = p.vz = 0;
           moveEntity(this.world, p, MC.PLAYER_W, MC.PLAYER_H);

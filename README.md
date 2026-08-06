@@ -217,12 +217,52 @@ every time they look behind them.
 
 Measured: 0.0012 blocks of positional error, 0.006° angular, about 600 B/s each way.
 
+### The shared world
+
+Placements, anchor charges, crystals, pearls, explosions and arena resets all cross the
+wire. Two things travel as **results rather than instructions**, because they are the two
+that would otherwise drift:
+
+- **Which crystals a blast took.** The detonating client sends the list. It cannot be
+  recomputed on the far side, because a crystal placed 30 ms ago might not have arrived
+  there yet — so both clients defer to the one that set the blast off, and agree.
+- **Which blocks a blast broke.** Same reason, plus `destroyedBlocks` is randomised per
+  ray. Deferring to the sender is cheaper than seeding an RNG and hoping both worlds were
+  identical at that instant, which is exactly the assumption that fails when my obsidian
+  and your explosion land in a different order on each machine.
+
+Chained detonations each broadcast their own blast, and the chain is walked in crystal-id
+order rather than array order — insertion order differs between clients, since your own
+placements land immediately and mine land when they arrive.
+
+A remote pearl flies and is drawn, but never teleports anyone and never sets off a
+crystal. Its thrower owns both, and will say what happened.
+
+`R Shift` rebuilds the arena on **both** sides. It has to: one client resetting alone
+parts the two worlds permanently. Entering a mode does not broadcast — only a deliberate
+reset does.
+
+Verified by running two sessions against each other with randomised interleaved delivery:
+129 placements, charges, detonations and chains, and the two worlds ended byte-identical
+across all 131 072 blocks, with matching crystal sets and anchor charges.
+
+### Focus
+
+In a room, losing the pointer no longer pauses. Pausing would freeze you in place for the
+other player and stall the tick accumulator, and there is nothing to pause anyway — their
+client keeps running regardless. Input is dropped instead, so you stand still rather than
+walking blind.
+
+A hidden tab gets no animation frames at all, which is the browser and not something this
+can work around. What it does instead is refuse to pretend the gap never happened: the
+backlog is dropped on the way back in, so you resume where you are rather than
+fast-forwarding through however long you were away. **Two side-by-side windows both keep
+rendering; two tabs in one window cannot.** Test with windows.
+
 ### Not wired up yet
 
-Blocks, crystals, anchors, pearls and explosions do not cross the wire, and nobody takes
-damage. Stage 1 is the transport: you can see each other move, and that is the part worth
-proving first, because if two networks refuse to punch through, everything built on top of
-them is wasted work.
+Nobody takes damage. Explosions compute the self-damage readout and the camera tilt as
+they always did, but health, totems, death and melee are stage 3.
 
 ## Validation
 
