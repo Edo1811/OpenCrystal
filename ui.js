@@ -830,6 +830,7 @@ const UI = (() => {
       if (this.peer) this.peer.close();
       const peer = new Net.Peer({
         onState: (state, detail) => this.onNetState(state, detail),
+        onDiag: r => this.showDiag(r),
         onSnapshot: snap => this.session.onSnapshot('peer', snap),
         onEvent: msg => {
           this.session.onRemoteEvent(msg);
@@ -850,10 +851,30 @@ const UI = (() => {
         this.setMode('freeplay');
         this.mpStatus('Connected.', 'ok');
         $('net-arena').textContent = room.size + '² ' + (room.arena === 'bedrock' ? 'bedrock' : 'stone');
+      } else if (state === 'stalled') {
+        this.mpStatus(detail, 'err');
+        this.showDiag(this.peer.report());
       } else if (state === 'failed' || state === 'dropped' || state === 'closed') {
         if (detail) this.mpStatus(detail, 'err');
         if (state === 'failed') this.leaveRoom();
+      } else if (state === 'connecting') {
+        this.mpStatus('Connecting\u2026', '');
       }
+    }
+
+    /* The handshake has four places it can stall and they need different
+       answers, so show which one you are actually sitting in rather than one
+       word that covers all of them. */
+    showDiag(r) {
+      if (!r) return;
+      const el = $('mp-diag');
+      if (!el) return;
+      el.style.display = '';
+      el.textContent =
+        'link ' + r.state + '  \u00b7  peer ' + r.pc + '  \u00b7  ice ' + r.ice +
+        '  \u00b7  channel ' + r.channel + '\n' +
+        'candidates: ' + r.host + ' local, ' + r.srflx + ' via STUN' +
+        (r.srflx === 0 ? '   \u2190 no STUN reply: only same-network can work' : '');
     }
 
     leaveRoom() {

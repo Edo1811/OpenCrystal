@@ -195,6 +195,41 @@ const Net = (() => {
       this.expectTick = null;
       this.lost = 0;
       this.seen = 0;
+      this.cands = {};
+      this.pcState = 'new';
+      this.iceState = 'new';
+      this.watchdog = null;
+    }
+
+    /* What we know about the attempt, in the order it goes wrong. */
+    report() {
+      const c = this.cands;
+      return {
+        state: this.state, pc: this.pcState, ice: this.iceState,
+        host: c.host || 0, srflx: c.srflx || 0, relay: c.relay || 0,
+        channel: this.ev ? this.ev.readyState : 'none'
+      };
+    }
+
+    diagnose() {
+      const r = this.report();
+      if (!r.host && !r.srflx)
+        return 'No connection candidates at all — WebRTC looks blocked in this browser.';
+      if (!r.srflx)
+        return 'STUN never answered, so only same-network connections can work. '
+             + 'If you are not on the same Wi-Fi, this cannot connect.';
+      return 'Candidates were exchanged but no route opened. One of the two networks '
+           + 'refuses direct connections — usually symmetric NAT or CGNAT.';
+    }
+
+    /* If nothing opens in twenty seconds it is not slow, it is stuck. Say so
+       rather than leaving the word "connecting" on screen indefinitely. */
+    armWatchdog() {
+      clearTimeout(this.watchdog);
+      this.watchdog = setTimeout(() => {
+        if (this.state !== 'open' && this.state !== 'connected')
+          this.setState('stalled', this.diagnose());
+      }, 20000);
     }
 
     // ---- lifecycle
@@ -209,11 +244,23 @@ const Net = (() => {
       const pc = new RTCPeerConnection({ iceServers: ICE, iceCandidatePoolSize: 2 });
       pc.addEventListener('connectionstatechange', () => {
         const s = pc.connectionState;
+        this.pcState = s;
         if (s === 'connected') this.setState('connected');
-        else if (s === 'failed') this.setState('failed',
-          'Could not punch through. One of the two networks is blocking direct connections.');
+        else if (s === 'failed') this.setState('failed', this.diagnose());
         else if (s === 'disconnected') this.setState('dropped');
         else if (s === 'closed') this.setState('closed');
+      });
+      pc.addEventListener('iceconnectionstatechange', () => {
+        this.iceState = pc.iceConnectionState;
+        if (this.h.onDiag) this.h.onDiag(this.report());
+      });
+      // count what kind of candidates we actually got. Zero reflexive ones
+      // means STUN never answered, which is worth knowing before blaming NAT.
+      pc.addEventListener('icecandidate', e => {
+        if (!e.candidate) return;
+        const t = (e.candidate.candidate.match(/ typ (\w+)/) || [])[1] || 'other';
+        this.cands[t] = (this.cands[t] || 0) + 1;
+        if (this.h.onDiag) this.h.onDiag(this.report());
       });
       this.pc = pc;
       return pc;
@@ -227,8 +274,13 @@ const Net = (() => {
       } else if (ch.label === 'ev') {
         this.ev = ch;
         ch.onmessage = e => this.onEvent(e.data);
-        ch.onopen = () => { this.setState('open'); this.startClock(); };
+        const opened = () => { this.setState('open'); this.startClock(); };
+        ch.onopen = opened;
         ch.onclose = () => this.setState('closed');
+        /* ondatachannel can hand over a channel that is already open, in which
+           case onopen has fired and will never fire again. Waiting for it is
+           how you sit on "connecting" forever with a working connection. */
+        if (ch.readyState === 'open') opened();
       }
     }
 
@@ -252,6 +304,7 @@ const Net = (() => {
       if (d.kind !== 'answer') throw new Error('That is a room code, not a reply code.');
       await this.pc.setRemoteDescription({ type: 'answer', sdp: d.sdp });
       this.setState('connecting');
+      this.armWatchdog();
     }
 
     /* Guest: take the host's code, produce the reply code. */
@@ -267,12 +320,14 @@ const Net = (() => {
       await pc.setLocalDescription(answer);
       await gathered(pc);
       this.setState('connecting');
+      this.armWatchdog();
       return { room: d.room, code: await encodeCode('answer', {}, pc.localDescription.sdp) };
     }
 
     close() {
       if (this.pingTimer) clearInterval(this.pingTimer);
-      this.pingTimer = null;
+      clearTimeout(this.watchdog);
+      this.pingTimer = this.watchdog = null;
       try { if (this.pc) this.pc.close(); } catch (e) { /* already gone */ }
       this.pc = this.snap = this.ev = null;
       this.setState('idle');
@@ -289,6 +344,7 @@ const Net = (() => {
        keeps the sample from the fastest round trip it has seen recently, since
        a fast round trip is the one least distorted by queueing. */
     startClock() {
+      clearTimeout(this.watchdog);
       if (this.pingTimer) clearInterval(this.pingTimer);
       if (this.role === 'guest') {
         const ping = () => {
