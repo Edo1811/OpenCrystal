@@ -51,6 +51,7 @@ const UI = (() => {
     roomSize: 48,               // arena width in blocks
     roomDoubleBP: false,        // everyone gets double blast protection
     roomAutoTotem: false,       // popped totems are not consumed
+    freeplayTotems: 16,         // the only finite item in the kit
     interpDelay: 100,           // ms of playback delay on the other player
 
     totemCount: 20,
@@ -404,6 +405,9 @@ const UI = (() => {
       $('hud-anchor').style.display = anchorMode ? '' : 'none';
       $('hud-refill').style.display = refill ? '' : 'none';
       $('hud-net').style.display = free ? '' : 'none';
+      $('vitals').style.display = free ? '' : 'none';
+      $('atk').classList.toggle('on', free);
+      $('death').classList.remove('on');
       $('hud-left').style.display = (refill || free) ? 'none' : '';
       $('hud-cycle').style.display = (refill || free) ? 'none' : '';
       $('hud-bottom').style.display = refill ? 'none' : '';
@@ -564,6 +568,13 @@ const UI = (() => {
               }
           }
         }
+        if (this.mode === 'freeplay' && document.pointerLockElement &&
+            e.code === this.settings.keys.offhand && !e.repeat) {
+          s.swapOffhand();
+          this.buildHotbar();
+          e.preventDefault();
+          return;
+        }
         if (document.pointerLockElement) {
           s.keys.add(e.code);
           if (this.settings.doubleTapSprint && !e.repeat &&
@@ -709,6 +720,17 @@ const UI = (() => {
       select('Arena size', 'roomSize', [[24, '24 × 24'], [32, '32 × 32'], [48, '48 × 48'], [60, '60 × 60']]);
       toggle('Allow double blast protection', 'roomDoubleBP');
       toggle('Auto totem', 'roomAutoTotem');
+      // this one is yours, not the room's, so it stays editable after connecting
+      const row = document.createElement('label');
+      row.className = 'row';
+      row.innerHTML = '<span>Your totems per life</span>';
+      const inp = document.createElement('input');
+      inp.type = 'range'; inp.min = 1; inp.max = 36; inp.step = 1; inp.value = s.freeplayTotems;
+      const out = document.createElement('b');
+      const show = () => out.textContent = inp.value;
+      inp.addEventListener('input', () => { s.freeplayTotems = +inp.value; show(); save(s); });
+      show();
+      row.appendChild(inp); row.appendChild(out); host.appendChild(row);
     }
 
     bindMultiplayer() {
@@ -851,11 +873,67 @@ const UI = (() => {
       if (this.mode === 'freeplay') this.setMode('dtap');
     }
 
+    /* Per-frame, not on the HUD's 80 ms cadence: a cooldown bar that updates
+       twelve times a second is worse than no cooldown bar. */
+    updateCombatOverlays(now) {
+      if (this.mode !== 'freeplay') return;
+      const s = this.session, p = s.player;
+
+      const cd = p.held === 'pickaxe' ? 20 : MC.SWORD_COOLDOWN_TICKS;
+      const ticks = s.tick - p.lastAttackTick + Math.min(1, s.acc / MC.TICK_MS);
+      const charge = Math.max(0, Math.min(1, ticks / cd));
+      const atk = $('atk');
+      const weapon = p.held === 'sword' || p.held === 'pickaxe';
+      atk.classList.toggle('on', weapon && p.alive);
+      atk.classList.toggle('full', charge >= 1);
+      $('atk-fill').style.width = (charge * 100).toFixed(1) + '%';
+
+      const hm = $('hitmark');
+      if (s.lastHitAt !== this.seenHitAt) {
+        this.seenHitAt = s.lastHitAt;
+        hm.classList.remove('show', 'crit');
+        void hm.offsetWidth;                       // restart the animation
+        hm.classList.add(s.lastHitCrit ? 'crit' : 'show');
+      }
+
+      $('death').classList.toggle('on', !p.alive);
+      $('death-text').textContent = p.deadUntil
+        ? 'Respawning in ' + Math.max(0, ((p.deadUntil - s.tick) / MC.TPS)).toFixed(1) + 's'
+        : '';
+    }
+
+    updateVitals() {
+      const p = this.session.player;
+      const hp = Math.max(0, p.health);
+      $('bar-hp').style.width = (hp / 20 * 100).toFixed(1) + '%';
+      // absorption rides on top of the health bar rather than beside it, so a
+      // full bar plus a gold overlay reads as "more than full" at a glance
+      $('bar-abs').style.width = Math.min(100, p.absorption / 20 * 100).toFixed(1) + '%';
+      $('hp-num').textContent = hp.toFixed(1) +
+        (p.absorption > 0 ? ' +' + p.absorption.toFixed(1) : '');
+      const host = $('effects');
+      const fx = p.effects.list();
+      const key = fx.map(e => e.id + e.amp + Math.ceil(e.ticks / 20)).join('|');
+      if (key === this.fxKey) return;
+      this.fxKey = key;
+      host.innerHTML = '';
+      const ROMAN = ['I', 'II', 'III', 'IV'];
+      for (const e of fx) {
+        const d = document.createElement('span');
+        d.className = 'fx ' + e.id;
+        d.textContent = e.id.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+          .replace(/ /g, ' ') + ' ' + (ROMAN[e.amp] || e.amp + 1) +
+          '  ' + Math.ceil(e.ticks / 20) + 's';
+        host.appendChild(d);
+      }
+    }
+
     updateNetHud() {
       const p = this.peer, s = this.session;
       $('net-state').textContent = !p ? 'offline' : (p.ready ? 'direct' : p.state);
       $('net-ping').textContent = (p && p.rtt !== null) ? Math.round(p.rtt) + ' ms' : '—';
       $('net-loss').textContent = p ? (p.lossRate() * 100).toFixed(1) + '%' : '—';
+      $('net-deaths').textContent = s.remoteDeaths + ' \u2013 ' + s.deaths;
       let peerText = 'waiting';
       for (const rp of s.remotes.values()) if (rp.present) peerText = 'in arena';
       $('net-peer').textContent = p && p.ready ? peerText : '—';
@@ -1151,7 +1229,7 @@ const UI = (() => {
         popRow.style.display = this.settings.dummyMode === 'totem' ? '' : 'none';
         $('totem-pops').textContent = st.totemPops;
       }
-      if (this.mode === 'freeplay') this.updateNetHud();
+      if (this.mode === 'freeplay') { this.updateNetHud(); this.updateVitals(); }
     }
 
     /* One bad frame used to kill the animation loop outright, which looks exactly
@@ -1165,6 +1243,7 @@ const UI = (() => {
         this.session.frame(t);     // draw world + overlay in one GL frame
         this.applyHurtFlash();     // cheap enough to run every frame, and a
                                    // flash on the 80 ms HUD cadence would stutter
+        this.updateCombatOverlays(t);
         this.updateHud(false);
         this.frames = (this.frames || 0) + 1;
         this.fpsWindow = this.fpsWindow || [];

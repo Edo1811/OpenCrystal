@@ -228,6 +228,51 @@ const MC = (() => {
   }
 
   /* ---------------------------------------------------------------------
+     Status effects.
+
+     Amplifier is zero-based the way the game stores it: amp 0 is "I".
+     Regeneration heals one point every 50 >> amp ticks, so II is twice as fast
+     as I rather than twice as strong. Absorption is flat extra health that is
+     spent before real health and never comes back on its own.
+     --------------------------------------------------------------------- */
+  const ABSORPTION_PER_LEVEL = 4;
+  const SLOW_FALL_GRAVITY = 0.01;
+  const FALL_SAFE_BLOCKS = 3;
+
+  function regenInterval(amplifier) { return 50 >> (amplifier | 0); }
+  function absorptionHealth(amplifier) { return ABSORPTION_PER_LEVEL * ((amplifier | 0) + 1); }
+
+  /* A totem does not heal you. It sets health to one point and hands you the
+     three effects, and it is the five seconds of Absorption II that decide
+     whether the follow-up crystal kills you. Getting this wrong makes every
+     exchange in the game wrong. */
+  const TOTEM_EFFECTS = [
+    { id: 'regeneration', amp: 1, ticks: 900 },
+    { id: 'fire_resistance', amp: 0, ticks: 800 },
+    { id: 'absorption', amp: 1, ticks: 100 }
+  ];
+
+  const GAPPLE_EFFECTS = [
+    { id: 'regeneration', amp: 1, ticks: 100 },
+    { id: 'absorption', amp: 0, ticks: 2400 }
+  ];
+
+  /* Fall damage, before armor. Slow Falling cancels it outright. */
+  function fallDamage(distance, slowFalling) {
+    if (slowFalling) return 0;
+    return Math.max(0, Math.floor(distance - FALL_SAFE_BLOCKS));
+  }
+
+  /* Critical hits need the swing to be falling and unhurried: airborne with
+     downward motion, not sprinting, cooldown effectively full, and no Slow
+     Falling — the game disables crits while it is active. */
+  function isCritical(onGround, vy, fallDistance, sprinting, charge, slowFalling) {
+    return !onGround && vy < 0 && fallDistance > 0 && !sprinting
+      && charge > 0.9 && !slowFalling;
+  }
+  const CRIT_MULTIPLIER = 1.5;
+
+  /* ---------------------------------------------------------------------
      Self-test. Reproduces values that are independently known so a broken
      constant shows up loudly instead of quietly changing how the trainer
      feels. Results are logged, not asserted, so a mismatch never stops the
@@ -283,6 +328,9 @@ const MC = (() => {
     POWER_CRYSTAL, POWER_ANCHOR, ANCHOR_MAX_CHARGES,
     PEARL_GRAVITY, PEARL_DRAG, PEARL_POWER, PEARL_INACCURACY,
     BLAST_RESISTANCE,
+    ABSORPTION_PER_LEVEL, SLOW_FALL_GRAVITY, FALL_SAFE_BLOCKS, CRIT_MULTIPLIER,
+    TOTEM_EFFECTS, GAPPLE_EFFECTS,
+    regenInterval, absorptionHealth, fallDamage, isCritical,
     explosionDamage, explosionKnockback, exposure, rayObstructed, destroyedBlocks,
     armorReduce, loadout, applyKnockback, attackCharge, chargeDamageMultiplier,
     selfTest

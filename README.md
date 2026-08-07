@@ -259,10 +259,66 @@ backlog is dropped on the way back in, so you resume where you are rather than
 fast-forwarding through however long you were away. **Two side-by-side windows both keep
 rendering; two tabs in one window cannot.** Test with windows.
 
+### Combat
+
+Only freeplay runs any of this. The drills still hand you the number and leave you
+untouched, exactly as before.
+
+**Damage is the victim's arithmetic.** Nobody sends a damage figure. A swing travels as
+its raw value, a blast as its position and power, and the receiving client works out what
+it did using its own armour, its own i-frames and its own position. The worst anyone can
+do from the far end is refuse to die.
+
+Blasts are stamped with the tick they went off on and evaluated against where the victim
+was *then*, pulled from a 40-tick position ring. Without that, trip time across the wire
+would charge you for ground you had already left.
+
+**Totems do not heal.** Health is set to one point, then Regeneration II for 45s, Fire
+Resistance 40s, Absorption II for 5s. Those eight absorption points are the reason a
+popped player is not instantly dead again, and that five-second window is what you are
+racing when you re-crystal someone. A totem in either hand fires — main hand first, as in
+game. `Auto totem` makes the pop free.
+
+| | |
+|---|---|
+| Regeneration | 1 HP every `50 >> amp` ticks — 50 for I, 25 for II |
+| Absorption | `4 × level`, spent before health, never regenerates |
+| Slow Falling | gravity `0.08` → `0.01`, fall damage cancelled, **and crits disabled** |
+| Fall damage | `floor(distance − 3)`, armour applies but no EPF |
+
+**Crits** need the real conditions: airborne, moving downward, fall distance above zero,
+not sprinting, cooldown past 90%, no Slow Falling. ×1.5. Under the crosshair, the vanilla
+cooldown bar — 12.5 ticks for the sword, 20 for the pickaxe — updated every frame, because
+a cooldown bar refreshed on the HUD's 80 ms cadence is worse than none. A hit tick flashes
+white, a crit flashes gold and larger.
+
+**Knockback** is the melee pair as always: `0.4` from taking damage plus
+`(kbLevel + sprint) · 0.5`. Explosion knockback is now real and follows the room's blast
+protection setting, which is what makes `Allow double BP` a genuine choice — measured on a
+crystal at two blocks, single BP takes 10.88 and gets launched, double BP takes the same
+10.88 and does not move at all. The second piece is a launch switch, not a tankiness one,
+because one already caps EPF at 20.
+
+Death is a 1.5 s red screen with a countdown, then a respawn with a fresh kit. Totems are
+the only thing you can run out of, so they are the only thing with a count; the slider is
+per player, not per room.
+
+### Checked
+
+| | |
+|---|---|
+| Regen II to full from 1 HP | 23.75 s — 19 HP at 25 ticks each |
+| Totem sequence | health 1, Absorption II = 8, Regen II 45 s, Fire Res 40 s |
+| Repeat hit inside i-frames | no effect, as it should be |
+| Blast rewound to its tick | 14.03 damage; the same blast stamped at *now*, 0 |
+| Drills after all of it | health untouched, readout still 13.70, still double BP |
+| Stage 2 convergence, re-run | 131 actions, 0 divergence across 131 072 blocks |
+
 ### Not wired up yet
 
-Nobody takes damage. Explosions compute the self-damage readout and the camera tilt as
-they always did, but health, totems, death and melee are stage 3.
+Hunger, the inventory and kit screen, gapples, the pickaxe, block breaking and the
+crossbow. Everything in that list is local item behaviour that barely touches the wire,
+which is why it is a separate pass from the damage resolution above.
 
 ## Validation
 

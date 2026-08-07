@@ -130,7 +130,7 @@ const Net = (() => {
   const F_SPRINT = 1, F_SNEAK = 2, F_GROUND = 4, F_SWING = 8, F_DEAD = 16;
 
   function encodeSnapshot(s) {
-    const b = new ArrayBuffer(16);
+    const b = new ArrayBuffer(17);
     const v = new DataView(b);
     v.setUint8(0, T_SNAP);
     v.setUint16(1, s.tick & 0xffff);
@@ -143,6 +143,7 @@ const Net = (() => {
     v.setUint8(13, s.flags | 0);
     v.setUint8(14, s.slot | 0);
     v.setUint8(15, Math.max(0, Math.min(255, Math.round(s.hp * 8))));
+    v.setUint8(16, Math.max(0, Math.min(255, Math.round((s.absorption || 0) * 8))));
     return b;
   }
 
@@ -164,7 +165,8 @@ const Net = (() => {
       swinging: !!(flags & F_SWING),
       dead: !!(flags & F_DEAD),
       slot: v.getUint8(14),
-      hp: v.getUint8(15) / 8
+      hp: v.getUint8(15) / 8,
+      absorption: v.byteLength > 16 ? v.getUint8(16) / 8 : 0
     };
   }
 

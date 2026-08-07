@@ -179,6 +179,54 @@
   .mp-summary b{font-weight:500;font-family:var(--mono);font-size:12px}
   .mp-status{min-height:20px;font-size:12px;color:var(--dim);margin:14px 0 0}
   .mp-status.err{color:#e07a7a}
+
+  /* ---- vitals ---- */
+  #vitals{left:50%;bottom:70px;transform:translateX(-50%);text-align:center;z-index:2}
+  .bars{display:flex;align-items:center;gap:9px;justify-content:center}
+  .bar{position:relative;width:220px;height:11px;border:1px solid var(--line);
+       border-radius:6px;background:rgba(10,8,14,.86);overflow:hidden}
+  .bar i{position:absolute;left:0;top:0;bottom:0;display:block;
+         transition:width .09s linear}
+  #bar-hp{background:linear-gradient(#e05a5a,#b83232);width:100%}
+  #bar-abs{background:linear-gradient(#e8c860,#c9a227);width:0}
+  #vitals b{font-family:var(--mono);font-size:12px;color:var(--ink);
+            min-width:52px;text-align:left;font-variant-numeric:tabular-nums}
+  #effects{display:flex;gap:5px;justify-content:center;margin-top:6px;min-height:17px}
+  .fx{font-size:10px;letter-spacing:.06em;padding:2px 6px;border-radius:4px;
+      font-family:var(--mono);border:1px solid var(--line);background:rgba(21,18,28,.86)}
+  .fx.regeneration{color:#7fd6a4;border-color:#2f6a4c}
+  .fx.absorption{color:#e8c860;border-color:#6d5a1f}
+  .fx.slow_falling{color:#8fc4e8;border-color:#2c5570}
+  .fx.fire_resistance{color:#e8a05a;border-color:#6d4520}
+
+  /* attack cooldown, right under the crosshair like vanilla */
+  #atk{position:fixed;left:50%;top:calc(50% + 15px);transform:translateX(-50%);
+       width:66px;height:4px;border-radius:2px;background:rgba(10,8,14,.7);
+       z-index:3;pointer-events:none;opacity:0;overflow:hidden}
+  #atk.on{opacity:1}
+  #atk i{display:block;height:100%;width:0;background:#cfcbdd}
+  #atk.full i{background:#f2eeff}
+
+  /* the hit tick: brief, and a different shape when it crits */
+  #hitmark{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);
+           width:26px;height:26px;z-index:3;pointer-events:none;opacity:0}
+  #hitmark.show{animation:hitpop .28s ease-out}
+  #hitmark.crit{animation:hitpop .38s ease-out}
+  #hitmark::before,#hitmark::after{content:"";position:absolute;left:11px;top:0;
+       width:4px;height:26px;border-radius:2px;background:#fff}
+  #hitmark::before{transform:rotate(45deg)}
+  #hitmark::after{transform:rotate(-45deg)}
+  #hitmark.crit::before,#hitmark.crit::after{background:#ffd76a;height:32px;top:-3px}
+  @keyframes hitpop{0%{opacity:0;transform:translate(-50%,-50%) scale(.5)}
+                    25%{opacity:.95;transform:translate(-50%,-50%) scale(1)}
+                    100%{opacity:0;transform:translate(-50%,-50%) scale(1.35)}}
+
+  #death{position:fixed;inset:0;z-index:6;pointer-events:none;opacity:0;
+         display:flex;align-items:center;justify-content:center;
+         background:rgba(160,20,20,.42);transition:opacity .16s ease}
+  #death.on{opacity:1}
+  #death-text{font-size:34px;font-weight:500;letter-spacing:-.01em;
+              color:#ffe2e2;text-shadow:0 2px 18px rgba(0,0,0,.6)}
   .mp-status.ok{color:var(--good)}
 </style>
 </head>
@@ -258,8 +306,21 @@
   <div class="stat"><span>Ping</span><b id="net-ping">—</b></div>
   <div class="stat"><span>Loss</span><b id="net-loss">—</b></div>
   <div class="stat"><span>Opponent</span><b id="net-peer">waiting</b></div>
+  <div class="stat"><span>Kills – deaths</span><b id="net-deaths">0 – 0</b></div>
   <div class="stat"><span>Arena</span><b id="net-arena">—</b></div>
 </div>
+
+<div class="hud" id="vitals" style="display:none">
+  <div class="bars">
+    <div class="bar"><i id="bar-hp"></i><i id="bar-abs"></i></div>
+    <b id="hp-num">20.0</b>
+  </div>
+  <div id="effects"></div>
+</div>
+
+<div id="atk"><i id="atk-fill"></i></div>
+<div id="hitmark"></div>
+<div id="death"><div id="death-text">You died</div></div>
 
 <div class="hud" id="equipped">
   <div class="eq" id="eq-off"><svg class="ico"><use href="#totem"/></svg><span>offhand</span></div>
@@ -385,6 +446,5 @@
 <script src="render.js"></script>
 <script src="game.js"></script>
 <script src="ui.js"></script>
-<!-- eof -->
 </body>
 </html>

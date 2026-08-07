@@ -5,6 +5,8 @@
 const Game = (() => {
 
   const AIR = 0, BEDROCK = 1, STONE = 2, OBSIDIAN = 3, GLOWSTONE = 4, ANCHOR = 5;
+  const DEFAULT_HOTBAR = ['sword', 'pearl', 'obsidian', 'crystal', null,
+                          'anchor', 'glowstone', null, 'totem'];
 
   const PALETTE = {
     [BEDROCK]: [0.32, 0.31, 0.33],
@@ -338,6 +340,31 @@ const Game = (() => {
     }
   }
 
+  /* Active status effects. The game's replacement rule: a stronger effect
+     always wins, an equal one wins only if it lasts longer, and a weaker one
+     is ignored outright rather than shortening what you already have. */
+  class Effects {
+    constructor() { this.map = new Map(); }
+    clear() { this.map.clear(); }
+    add(id, amp, ticks) {
+      const cur = this.map.get(id);
+      if (cur && (cur.amp > amp || (cur.amp === amp && cur.ticks >= ticks))) return;
+      this.map.set(id, { amp, ticks });
+    }
+    remove(id) { this.map.delete(id); }
+    has(id) { return this.map.has(id); }
+    amp(id) { const e = this.map.get(id); return e ? e.amp : -1; }
+    ticks(id) { const e = this.map.get(id); return e ? e.ticks : 0; }
+    tick() {
+      for (const [id, e] of this.map) {
+        if (--e.ticks <= 0) this.map.delete(id);
+      }
+    }
+    list() {
+      return [...this.map.entries()].map(([id, e]) => ({ id, amp: e.amp, ticks: e.ticks }));
+    }
+  }
+
   // ---------------------------------------------------------------- player
   class Player {
     constructor(x, y, z) {
@@ -352,11 +379,31 @@ const Game = (() => {
       this.lastAttackTick = -100;
       this.lastUseTick = -100;
       this.pearlCooldownUntil = -100;
-      this.loadout = MC.loadout(2);   // always double blast protection
+      this.loadout = MC.loadout(2);   // drills keep double blast protection
+      // ---- combat state. Untouched outside freeplay, where the drills still
+      // treat the player as invulnerable exactly as before.
+      this.offhand = 'totem';
+      this.health = 20;
+      this.absorption = 0;
+      this.effects = new Effects();
+      this.invuln = 0;
+      this.lastDamage = 0;
+      this.fallDistance = 0;
+      this.deadUntil = 0;
+      this.regenTimer = 0;
+      this.totems = 0;
     }
     get box() { return box(this.x, this.y, this.z, MC.PLAYER_W, MC.PLAYER_H); }
     get eye() { return { x: this.x, y: this.y + MC.PLAYER_EYE, z: this.z }; }
+    get centre() { return { x: this.x, y: this.y + MC.PLAYER_H / 2, z: this.z }; }
     get held() { return this.hotbar[this.slot]; }
+    get alive() { return this.deadUntil === 0; }
+    /* Which hand holds a totem. The game checks the main hand first. */
+    totemHand() {
+      if (this.held === 'totem') return 'main';
+      if (this.offhand === 'totem') return 'off';
+      return null;
+    }
   }
 
   /* Axis-separated AABB movement. For each axis the swept region is scanned
@@ -637,6 +684,11 @@ const Game = (() => {
       this.netTick = 0;
       this.entitySeq = 0;            // ids are prefixed by role, so they never collide
       this.applyingRemote = false;   // stops an applied event echoing back out
+      this.posHistory = [];          // for rewinding a blast to when it happened
+      this.deaths = 0; this.remoteDeaths = 0;
+      this.deathAt = -1e9;
+      this.totemPopAt = -1e9; this.remotePopAt = -1e9;
+      this.lastHitAt = -1e9; this.lastHitCrit = false;
       // ---- presentation state. None of this feeds back into the simulation:
       // the tilt, the shake and the particles are readouts you can feel.
       this.particles = [];
@@ -708,6 +760,25 @@ const Game = (() => {
       this.bobPhase = 0; this.bobAmt = 0;
       this.dummyPopAt = -1e9;
       this.refill = this.mode === 'refill' ? new Refill(this) : null;
+      this.posHistory.length = 0;
+      this.player.loadout = this.combat ? this.playerLoadout() : MC.loadout(2);
+      if (this.combat) {
+        this.player.health = 20; this.player.absorption = 0;
+        this.player.effects.clear();
+        this.player.invuln = 0; this.player.lastDamage = 0;
+        this.player.fallDistance = 0; this.player.deadUntil = 0;
+        this.giveKit();
+      }
+      this.deathAt = -1e9;
+      this.totemPopAt = -1e9; this.remotePopAt = -1e9;
+    }
+
+    /* F swaps the held item with the offhand. */
+    swapOffhand() {
+      const p = this.player;
+      const tmp = p.hotbar[p.slot];
+      p.hotbar[p.slot] = p.offhand;
+      p.offhand = tmp;
     }
 
     /* ------------------------------------------------------------------
@@ -763,6 +834,29 @@ const Game = (() => {
           case 'pt':
             this.pearls.push(new Pearl(m.x, m.y, m.z, m.vx, m.vy, m.vz, true));
             break;
+          case 'hit': {
+            // their swing, my arithmetic
+            this.hurtPlayer(m.raw, 'melee', {
+              strength: m.base, dirX: m.dirX, dirZ: m.dirZ,
+              fromX: m.fromX, fromZ: m.fromZ
+            });
+            if (m.bonus > 0) {
+              const p = this.player, lo = p.loadout;
+              const vel = MC.applyKnockback({ x: p.vx, y: p.vy, z: p.vz },
+                m.bonus, m.dirX, m.dirZ, p.onGround, lo.kbResist,
+                this.settings.kbHorizontal, this.settings.kbVertical);
+              p.vx = vel.x; p.vy = vel.y; p.vz = vel.z;
+            }
+            break;
+          }
+          case 'pop': {
+            const rp = this.remotes.values().next().value;
+            if (rp) this.remotePopAt = performance.now();
+            break;
+          }
+          case 'die':
+            this.remoteDeaths++;
+            break;
           case 'rs':
             this.reset(true);
             break;
@@ -780,8 +874,151 @@ const Game = (() => {
         const c = this.findCrystal(id);
         if (c) c.alive = false;
       }
-      this.explode(m.x, m.y, m.z, m.power, { gone: m.gone || [] });
+      this.explode(m.x, m.y, m.z, m.power, { gone: m.gone || [], atTick: m.tick });
       this.crystals = this.crystals.filter(c => c.alive);
+    }
+
+    /* ------------------------------------------------------------------
+       Player damage. Only freeplay runs it; the drills still hand the number
+       to the readout and leave you untouched.
+
+       This is the victim's side of the wire. Nobody sends me a damage figure —
+       they send what happened, and my client works out what it did to me using
+       my armour, my i-frames and my position. The worst a bad actor can do
+       from the far end is refuse to die.
+       ------------------------------------------------------------------ */
+    get combat() { return this.mode === 'freeplay'; }
+
+    playerLoadout() {
+      return MC.loadout(this.room && this.room.doubleBP ? 2 : 1);
+    }
+
+    /* raw is pre-armour damage. Returns true if anything landed. */
+    hurtPlayer(raw, source, kb) {
+      const p = this.player;
+      if (!this.combat || !p.alive || raw <= 0) return false;
+      const lo = p.loadout;
+      const epf = source === 'explosion' ? lo.epfExplosion
+        : source === 'fall' ? 0 : lo.epfMelee;
+      const applied = source === 'fall'
+        ? MC.armorReduce(raw, lo.armorPoints, lo.toughness, 0)
+        : MC.armorReduce(raw, lo.armorPoints, lo.toughness, epf);
+
+      // i-frames: a second hit inside the window only lands its excess
+      let dealt = applied;
+      if (p.invuln > 0) {
+        if (applied <= p.lastDamage) return false;
+        dealt = applied - p.lastDamage;
+      }
+      p.lastDamage = Math.max(p.lastDamage, applied);
+      p.invuln = MC.IFRAME_TICKS;
+
+      // absorption is spent first and does not come back on its own
+      if (p.absorption > 0) {
+        const soaked = Math.min(p.absorption, dealt);
+        p.absorption -= soaked;
+        dealt -= soaked;
+        if (p.absorption <= 0) p.effects.remove('absorption');
+      }
+      p.health -= dealt;
+      this.selfDamageLast = applied;
+      this.stats.selfDamage += applied;
+      this.hurtFrom(kb && kb.fromX !== undefined ? kb.fromX : p.x,
+        p.y, kb && kb.fromZ !== undefined ? kb.fromZ : p.z, applied);
+
+      if (kb && kb.strength > 0) {
+        const vel = MC.applyKnockback({ x: p.vx, y: p.vy, z: p.vz },
+          kb.strength, kb.dirX, kb.dirZ, p.onGround, lo.kbResist,
+          this.settings.kbHorizontal, this.settings.kbVertical);
+        p.vx = vel.x; p.vy = vel.y; p.vz = vel.z;
+      }
+
+      if (p.health <= 0) this.lethal();
+      return true;
+    }
+
+    /* Health has run out. A totem in either hand turns that into one point and
+       three effects; nothing in hand turns it into a death. */
+    lethal() {
+      const p = this.player;
+      const hand = p.totemHand();
+      if (hand) {
+        if (!(this.room && this.room.autoTotem)) {
+          if (hand === 'main') p.hotbar[p.slot] = null; else p.offhand = null;
+          p.totems = Math.max(0, p.totems - 1);
+        }
+        this.popTotem();
+        return;
+      }
+      this.die();
+    }
+
+    popTotem() {
+      const p = this.player;
+      p.health = 1;
+      p.absorption = 0;
+      for (const e of MC.TOTEM_EFFECTS) this.applyEffect(e.id, e.amp, e.ticks);
+      this.totemPopAt = performance.now();
+      this.stats.totemPops++;
+      this.spawnTotemParticles(p.x, p.y + 1.0, p.z);
+      this.netSend({ t: 'pop' });
+    }
+
+    applyEffect(id, amp, ticks) {
+      const p = this.player;
+      p.effects.add(id, amp, ticks);
+      if (id === 'absorption')
+        p.absorption = Math.max(p.absorption, MC.absorptionHealth(amp));
+      if (id === 'regeneration') p.regenTimer = MC.regenInterval(amp);
+    }
+
+    die() {
+      const p = this.player;
+      p.health = 0;
+      p.absorption = 0;
+      p.effects.clear();
+      p.deadUntil = this.tick + Math.round(1.5 * MC.TPS);
+      p.vx = p.vy = p.vz = 0;
+      this.deathAt = performance.now();
+      this.deaths++;
+      this.netSend({ t: 'die' });
+    }
+
+    respawn() {
+      const p = this.player, sp = p.spawn;
+      p.x = sp.x; p.y = sp.y; p.z = sp.z;
+      p.vx = p.vy = p.vz = 0;
+      p.yaw = p.spawnYaw || 0; p.pitch = 0;
+      p.health = 20; p.absorption = 0;
+      p.effects.clear();
+      p.invuln = MC.IFRAME_TICKS; p.lastDamage = 0;
+      p.fallDistance = 0; p.deadUntil = 0; p.regenTimer = 0;
+      this.giveKit();
+    }
+
+    /* A fresh kit. Everything is infinite except totems, so the only thing
+       with a count is the one thing you can run out of. */
+    giveKit() {
+      const p = this.player;
+      p.hotbar = (this.settings.hotbar || DEFAULT_HOTBAR).slice();
+      p.offhand = 'totem';
+      p.slot = 0;
+      p.totems = this.settings.freeplayTotems || 16;
+    }
+
+    /* Where I was on a given tick. An explosion arrives stamped with the tick
+       it went off on, and evaluating it against where I am now would punish me
+       for the trip time — the blast happened where I was standing. */
+    positionAt(tick) {
+      const h = this.posHistory;
+      if (!h.length || tick == null) return null;
+      let best = h[h.length - 1], bestD = Infinity;
+      for (let i = h.length - 1; i >= 0; i--) {
+        const d = Math.abs(((h[i].tick - tick) << 16) >> 16);
+        if (d < bestD) { bestD = d; best = h[i]; }
+        if (d === 0) break;
+      }
+      return bestD <= 20 ? best : null;
     }
 
     // -------- targeting
@@ -803,6 +1040,13 @@ const Game = (() => {
       if (this.hasDummy && !this.dummy.deadUntil) {
         const t = rayBox(e.x, e.y, e.z, d.x, d.y, d.z, this.dummy.box);
         if (t >= 0 && t < bestT) { bestT = t; best = { type: 'dummy', ref: this.dummy, dist: t }; }
+      }
+      // the other player is hit where you see them, which is the interpolated
+      // position — you aim at what is on screen, so that is what counts
+      for (const rp of this.remotes.values()) {
+        if (!rp.present || rp.dead) continue;
+        const t = rayBox(e.x, e.y, e.z, d.x, d.y, d.z, rp.box);
+        if (t >= 0 && t < bestT) { bestT = t; best = { type: 'remote', ref: rp, dist: t }; }
       }
       return best;
     }
@@ -833,6 +1077,8 @@ const Game = (() => {
       if (hit.type === 'crystal') {
         this.stats.flickErrors.push(this.flickError({ x: hit.ref.x, y: hit.ref.y + 1, z: hit.ref.z }));
         this.detonate(hit.ref);
+      } else if (hit.type === 'remote') {
+        this.hitRemote(hit.ref, charge);
       } else {
         const d = hit.ref;
         this.stats.flickErrors.push(this.flickError(d.centre));
@@ -858,6 +1104,33 @@ const Game = (() => {
         }
         d.vx = vel.x; d.vy = vel.y; d.vz = vel.z;
       }
+    }
+
+    /* A swing that connected with the other player. Nothing about the result
+       is decided here: the raw swing goes over the wire and their client works
+       out what it did, because their armour and their i-frames are theirs. */
+    hitRemote(rp, charge) {
+      const p = this.player;
+      this.stats.flickErrors.push(this.flickError(rp.centre));
+      if (p.held !== 'sword' && p.held !== 'pickaxe') return;
+      const base = p.held === 'pickaxe' ? 6.0 : MC.SWORD_DAMAGE;
+      const crit = MC.isCritical(p.onGround, p.vy, p.fallDistance, p.sprinting,
+        charge, p.effects.has('slow_falling'));
+      let raw = base * MC.chargeDamageMultiplier(charge);
+      if (crit) raw *= MC.CRIT_MULTIPLIER;
+      const sprintHit = p.sprinting && charge >= MC.SPRINT_KB_CHARGE ? 1 : 0;
+      const bonus = (this.settings.knockbackLevel + sprintHit) * 0.5;
+      // the vector runs from the target toward me; the formula subtracts it
+      const dirX = rp.x - p.x, dirZ = rp.z - p.z;
+      this.netSend({
+        t: 'hit', tick: this.netTick, raw, crit,
+        dirX, dirZ, base: 0.4, bonus, fromX: p.x, fromZ: p.z
+      });
+      this.stats.damageEvents.push({ t: performance.now(), amount: raw });
+      this.stats.totalDamage += raw;
+      this.lastHitAt = performance.now();
+      this.lastHitCrit = crit;
+      if (sprintHit) { p.vx *= 0.6; p.vz *= 0.6; p.sprinting = false; }
     }
 
     hurtDummy(raw, source) {
@@ -952,8 +1225,9 @@ const Game = (() => {
       const res = this.explode(x + 0.5, y + 0.5, z + 0.5, MC.POWER_ANCHOR);
       if (!this.applyingRemote && res)
         this.netSend({
-          t: 'ex', x: x + 0.5, y: y + 0.5, z: z + 0.5, power: MC.POWER_ANCHOR,
-          kill: res.kill, gone: res.gone.concat([x + ',' + y + ',' + z])
+          t: 'ex', tick: this.netTick, x: x + 0.5, y: y + 0.5, z: z + 0.5,
+          power: MC.POWER_ANCHOR, kill: res.kill,
+          gone: res.gone.concat([x + ',' + y + ',' + z])
         });
       this.stats.selfDamages.push(this.selfDamageLast);
       // the rep is judged on what the blast would have done to you, not on
@@ -1018,8 +1292,8 @@ const Game = (() => {
       const res = this.explode(crystal.x, crystal.y, crystal.z, MC.POWER_CRYSTAL);
       if (!this.applyingRemote && res)
         this.netSend({
-          t: 'ex', x: crystal.x, y: crystal.y, z: crystal.z, power: MC.POWER_CRYSTAL,
-          kill: [crystal.id].concat(res.kill), gone: res.gone
+          t: 'ex', tick: this.netTick, x: crystal.x, y: crystal.y, z: crystal.z,
+          power: MC.POWER_CRYSTAL, kill: [crystal.id].concat(res.kill), gone: res.gone
         });
     }
 
@@ -1051,18 +1325,44 @@ const Game = (() => {
         }
       }
 
-      // ---- the player takes no damage; the number is shown as a readout only
+      /* ---- the player.
+
+         Outside freeplay this is a readout and nothing more: the drills give
+         you double blast protection and no damage handling at all.
+
+         Inside freeplay it is the real thing, evaluated against where I was on
+         the tick the blast went off rather than where I am now — otherwise the
+         trip time across the wire would charge me for ground I already left. */
       const p = this.player;
-      const pdist = Math.hypot(p.x - cx, p.y - cy, p.z - cz);
-      if (pdist <= 2 * power) {
-        const exp = MC.exposure(cx, cy, cz, p.box, isSolid);
+      let px = p.x, py = p.y, pz = p.z;
+      if (opts && opts.atTick != null) {
+        const past = this.positionAt(opts.atTick);
+        if (past) { px = past.x; py = past.y; pz = past.z; }
+      }
+      const pdist = Math.hypot(px - cx, py - cy, pz - cz);
+      if (pdist <= 2 * power && (!this.combat || p.alive)) {
+        const pbox = box(px, py, pz, MC.PLAYER_W, MC.PLAYER_H);
+        const exp = MC.exposure(cx, cy, cz, pbox, isSolid);
         const raw = MC.explosionDamage(power, pdist, exp, this.settings.difficulty);
         const lo = p.loadout;
-        this.selfDamageLast = MC.armorReduce(raw, lo.armorPoints, lo.toughness, lo.epfExplosion);
-        this.stats.selfDamage += this.selfDamageLast;
-        // double blast protection is 100% explosion knockback resistance,
-        // so there is deliberately no velocity change here
-        if (this.selfDamageLast > 0) this.hurtFrom(cx, cy, cz, this.selfDamageLast);
+        if (this.combat) {
+          const mag = MC.explosionKnockback(power, pdist, exp, lo.explosionKbResist, 1);
+          let kx = px - cx, ky = (py + MC.PLAYER_EYE) - cy, kz = pz - cz;
+          const l = Math.hypot(kx, ky, kz) || 1;
+          this.hurtPlayer(raw, 'explosion', { fromX: cx, fromZ: cz });
+          if (mag > 0) {
+            p.vx += kx / l * mag * this.settings.kbHorizontal;
+            p.vy += ky / l * mag * this.settings.kbVertical;
+            p.vz += kz / l * mag * this.settings.kbHorizontal;
+            p.fallDistance = 0;      // being launched is not falling yet
+          }
+        } else {
+          this.selfDamageLast = MC.armorReduce(raw, lo.armorPoints, lo.toughness, lo.epfExplosion);
+          this.stats.selfDamage += this.selfDamageLast;
+          // double blast protection is 100% explosion knockback resistance,
+          // so there is deliberately no velocity change here
+          if (this.selfDamageLast > 0) this.hurtFrom(cx, cy, cz, this.selfDamageLast);
+        }
       }
       // the shake follows distance, not damage: a blast behind full cover still
       // went off two blocks from your head
@@ -1224,8 +1524,9 @@ const Game = (() => {
       if (this.refill) this.refill.tick(performance.now());
 
       // ---- player movement
-      const forward = (this.keys.has(s.keys.forward) ? 1 : 0) - (this.keys.has(s.keys.back) ? 1 : 0);
-      const strafeIn = (this.keys.has(s.keys.left) ? 1 : 0) - (this.keys.has(s.keys.right) ? 1 : 0);
+      const dead = this.combat && !p.alive;
+      const forward = dead ? 0 : (this.keys.has(s.keys.forward) ? 1 : 0) - (this.keys.has(s.keys.back) ? 1 : 0);
+      const strafeIn = dead ? 0 : (this.keys.has(s.keys.left) ? 1 : 0) - (this.keys.has(s.keys.right) ? 1 : 0);
       p.sneaking = this.keys.has(s.keys.sneak);
       const sprintHeld = this.keys.has(s.keys.sprint) || this.sprintLatch;
       if (sprintHeld && forward > 0 && !p.sneaking) p.sprinting = true;
@@ -1248,7 +1549,7 @@ const Game = (() => {
         p.vz += sf * cosY + sx * sinY;
       }
 
-      if (this.keys.has(s.keys.jump) && p.onGround) {
+      if (!dead && this.keys.has(s.keys.jump) && p.onGround) {
         p.vy = MC.JUMP_V;
         if (p.sprinting) {
           const yr = p.yaw * Math.PI / 180;
@@ -1257,14 +1558,49 @@ const Game = (() => {
         }
       }
 
+      const wasAir = !p.onGround;
+      const preY = p.y;
       moveEntity(this.world, p, MC.PLAYER_W, MC.PLAYER_H);
+      // fall distance accumulates only while descending, and lands with you
+      if (this.combat) {
+        if (p.onGround) {
+          if (p.fallDistance > 0) {
+            const raw = MC.fallDamage(p.fallDistance, p.effects.has('slow_falling'));
+            if (raw > 0) this.hurtPlayer(raw, 'fall', null);
+          }
+          p.fallDistance = 0;
+        } else if (wasAir && p.y < preY) {
+          p.fallDistance += preY - p.y;
+        }
+      }
       // the same friction value drives acceleration and the post-move drag,
       // which is what keeps top speed on 4.317 / 5.612 m/s
       p.vx *= f; p.vz *= f;
-      p.vy = (p.vy - MC.GRAVITY) * MC.VDRAG;
+      const grav = (this.combat && p.effects.has('slow_falling'))
+        ? MC.SLOW_FALL_GRAVITY : MC.GRAVITY;
+      p.vy = (p.vy - grav) * MC.VDRAG;
       if (Math.abs(p.vx) < 0.003) p.vx = 0;
       if (Math.abs(p.vz) < 0.003) p.vz = 0;
       if (p.y < -5) { p.x = p.spawn.x; p.y = p.spawn.y; p.z = p.spawn.z; p.vx = p.vy = p.vz = 0; }
+
+      // ---- combat upkeep
+      if (this.combat) {
+        if (p.invuln > 0) { p.invuln--; if (p.invuln === 0) p.lastDamage = 0; }
+        p.effects.tick();
+        if (!p.effects.has('absorption')) p.absorption = 0;
+        if (p.effects.has('regeneration') && p.alive && p.health < 20) {
+          if (--p.regenTimer <= 0) {
+            p.health = Math.min(20, p.health + 1);
+            p.regenTimer = MC.regenInterval(p.effects.amp('regeneration'));
+          }
+        }
+        if (!p.alive && this.tick >= p.deadUntil) this.respawn();
+        if (p.y < -5 && p.alive) this.hurtPlayer(1000, 'fall', null);
+      }
+      // one entry per tick, twenty ticks deep — a blast older than a second
+      // is not worth rewinding for
+      this.posHistory.push({ tick: this.netTick, x: p.x, y: p.y, z: p.z });
+      if (this.posHistory.length > 40) this.posHistory.shift();
 
       // ---- dummy
       const d = this.dummy;
@@ -1345,10 +1681,11 @@ const Game = (() => {
         if (p.sneaking) flags |= Net.F_SNEAK;
         if (p.onGround) flags |= Net.F_GROUND;
         if (performance.now() - this.swingAt < 120) flags |= Net.F_SWING;
+        if (this.combat && !p.alive) flags |= Net.F_DEAD;
         this.net.sendSnapshot({
           tick: this.netTick,
           x: p.x, y: p.y, z: p.z, yaw: p.yaw, pitch: p.pitch,
-          flags, slot: p.slot, hp: p.health === undefined ? 20 : p.health
+          flags, slot: p.slot, hp: p.health, absorption: p.absorption
         });
       }
 
@@ -1371,6 +1708,10 @@ const Game = (() => {
 
     handleInput() {
       const p = this.player;
+      if (this.combat && !p.alive) {
+        this.mouse.leftQueued = 0; this.mouse.rightQueued = 0;
+        return;
+      }
       if (this.mouse.leftQueued > 0) {
         this.mouse.leftQueued--;
         this.attack();
@@ -1526,6 +1867,20 @@ const Game = (() => {
         boxes.push({ x0: rp.x - ms, y0: top + 0.34, z0: rp.z - ms,
           x1: rp.x + ms, y1: top + 0.34 + ms * 2, z1: rp.z + ms,
           col: [0.69 + pulse * 0.2, 0.44, 0.82] });
+      }
+
+      // the other player's totem pop
+      const rpop = (now - this.remotePopAt) / 700;
+      if (rpop >= 0 && rpop < 1) {
+        for (const rp of this.remotes.values()) {
+          if (!rp.present) continue;
+          const k = 1 - rpop, sz = 0.42 * k + 0.06, y = rp.y + 1.0 + rpop * 0.8;
+          boxes.push({
+            x0: rp.x - sz, y0: y - sz, z0: rp.z - sz,
+            x1: rp.x + sz, y1: y + sz, z1: rp.z + sz,
+            col: [0.95, 0.78 * k + 0.15, 0.30 * k]
+          });
+        }
       }
 
       // crystals: bobbing, spinning cube inside the 2x2x2 hitbox
