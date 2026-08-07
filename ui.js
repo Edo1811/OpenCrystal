@@ -51,7 +51,9 @@ const UI = (() => {
     roomSize: 48,               // arena width in blocks
     roomDoubleBP: false,        // everyone gets double blast protection
     roomAutoTotem: false,       // popped totems are not consumed
-    freeplayTotems: 16,         // the only finite item in the kit
+    freeplayLives: 8,           // only meaningful with auto totem on
+    savedKits: [],              // named layouts; the working draft is not saved
+    efficiencyLevel: 5,         // on the pickaxe; obsidian in ~2.1 s
     interpDelay: 100,           // ms of playback delay on the other player
 
     totemCount: 20,
@@ -105,8 +107,16 @@ const UI = (() => {
     pearl: { label: 'Ender pearl', col: '#2f9c85' },
     glowstone: { label: 'Glowstone', col: '#e0cf82' },
     anchor: { label: 'Respawn anchor', col: '#4b3f66' },
-    totem: { label: 'Totem', col: '#c8a24a' }
+    totem: { label: 'Totem', col: '#c8a24a' },
+    pickaxe: { label: 'Netherite pickaxe', col: '#5b5566' },
+    crossbow: { label: 'Crossbow', col: '#8a6a42' },
+    gapple: { label: 'Golden apple', col: '#e2ba38' }
   };
+
+  /* Everything you can pack. Totems last, since they are the one thing whose
+     quantity is a real decision. */
+  const KIT_PALETTE = ['sword', 'pickaxe', 'crossbow', 'pearl', 'obsidian',
+                       'crystal', 'anchor', 'glowstone', 'gapple', 'totem'];
 
   function load() {
     const s = JSON.parse(JSON.stringify(DEFAULTS));
@@ -247,9 +257,59 @@ const UI = (() => {
     }
 
     /* Rebuilt every frame; cursor pushed last so it is the final quad drawn. */
+    /* Whichever inventory is live: the refill drill's, or freeplay's kit. */
+    activeInv() {
+      const s = this.session;
+      if (s.refill && !s.refill.finished) return s.refill;
+      if (this.mode === 'freeplay' && s.kit) return s.kit;
+      return null;
+    }
+
+    /* 3x5 pixel digits, so a stack count can be drawn in the same quad pass as
+       everything else rather than needing a text layer over the GL frame. */
+    digitQuads(n, x, y, u, out) {
+      const GLYPH = {
+        0: ['111','101','101','101','111'], 1: ['010','110','010','010','111'],
+        2: ['111','001','111','100','111'], 3: ['111','001','111','001','111'],
+        4: ['101','101','111','001','001'], 5: ['111','100','111','001','111'],
+        6: ['111','100','111','101','111'], 7: ['111','001','010','010','010'],
+        8: ['111','101','111','101','111'], 9: ['111','101','111','001','111']
+      };
+      const str = String(n);
+      const w = str.length * 4 * u - u;
+      for (const pass of [0, 1]) {
+        const o = pass === 0 ? u : 0;
+        const c = pass === 0 ? [0.03, 0.02, 0.04, 0.95] : [1, 1, 1, 1];
+        let cx = x - w;
+        for (const ch of str) {
+          const g = GLYPH[ch];
+          if (g) for (let r = 0; r < 5; r++) for (let col = 0; col < 3; col++)
+            if (g[r][col] === '1')
+              out.push({ x: cx + col * u + o, y: y + r * u + o, w: u, h: u, c });
+          cx += 4 * u;
+        }
+      }
+    }
+
+    /* Generic item icon. The totem keeps its sprite; everything else is its
+       swatch, which is the same colour the hotbar already uses for it. */
+    itemQuads(item, x, y, size, out) {
+      if (item === 'totem') return this.totemQuads(x, y, size, out);
+      const meta = ITEMS[item];
+      if (!meta) return;
+      const hex = meta.col.replace('#', '');
+      const c = [parseInt(hex.slice(0, 2), 16) / 255, parseInt(hex.slice(2, 4), 16) / 255,
+                 parseInt(hex.slice(4, 6), 16) / 255, 1];
+      const i = size * 0.14;
+      out.push({ x: x - 1, y: y - 1, w: size + 2, h: size + 2, c: [0.03, 0.02, 0.05, 0.9] });
+      out.push({ x, y, w: size, h: size, c });
+      out.push({ x: x + i, y: y + i, w: size - i * 2, h: size * 0.30,
+                 c: [Math.min(1, c[0] + .18), Math.min(1, c[1] + .18), Math.min(1, c[2] + .18), 1] });
+    }
+
     buildOverlay() {
-      const r = this.session.refill;
-      if (!r || !r.open || r.finished) { this.renderer.setOverlay(null); return; }
+      const r = this.activeInv();
+      if (!r || !r.open) { this.renderer.setOverlay(null); return; }
       const L = this.layout = this.invLayout();
       const q = [];
       q.push({ x: 0, y: 0, w: innerWidth, h: innerHeight, c: [0.03, 0.02, 0.05, 0.55] });
@@ -269,22 +329,33 @@ const UI = (() => {
           x: sl.x, y: sl.y, w: sl.s, h: sl.s,
           c: hot ? [0.24, 0.21, 0.30, 1] : [0.11, 0.10, 0.15, 1]
         });
-        if (item === 'totem') this.totemQuads(sl.x + 10, sl.y + 10, 24, q);
+        if (item) this.itemQuads(item, sl.x + 10, sl.y + 10, 24, q);
+        // a count only means something where it can run out
+        const n = r.count ? r.count(sl.kind, sl.index) : 1;
+        if (item && n !== 1 && n !== Infinity)
+          this.digitQuads(n, sl.x + sl.s - 4, sl.y + sl.s - 13, 2, q);
+        if (item && n === Infinity)
+          q.push({ x: sl.x + sl.s - 9, y: sl.y + sl.s - 9, w: 5, h: 5,
+                   c: [0.55, 0.50, 0.62, 1] });
       }
 
       if (this.settings.invCursor === 'drawn') {
-        if (r.cursor === 'totem')
-          this.totemQuads(this.drawn.x + 12, this.drawn.y + 10, 24, q);
+        if (r.cursor) this.itemQuads(r.cursor, this.drawn.x + 12, this.drawn.y + 10, 24, q);
         this.cursorQuads(this.drawn.x, this.drawn.y, q);
-      } else if (r.cursor === 'totem') {
-        this.totemQuads(this.drawn.x + 12, this.drawn.y + 10, 24, q);
+      } else if (r.cursor) {
+        this.itemQuads(r.cursor, this.drawn.x + 12, this.drawn.y + 10, 24, q);
       }
       this.renderer.setOverlay(q);
     }
 
     updateInventory() {
       const r = this.session.refill;
-      if (!r) return;
+      if (!r) {
+        // freeplay's kit only needs the crosshair hidden while it is open
+        const k = this.activeInv();
+        if (k) $('cross').style.display = k.open ? 'none' : '';
+        return;
+      }
       const eq = $('equipped');
       eq.classList.toggle('on', !r.finished && !r.open);
       $('cross').style.display = (r.open && !r.finished) ? 'none' : '';
@@ -304,7 +375,7 @@ const UI = (() => {
     slotUnderCursor() { return this.invSlotAt(this.drawn.x, this.drawn.y); }
 
     accumulate(e) {
-      const r = this.session.refill;
+      const r = this.activeInv();
       if (!r || !r.open || r.finished || this.settings.invCursor !== 'drawn') return;
       const list = e.getCoalescedEvents ? e.getCoalescedEvents() : null;
       if (list && list.length) {
@@ -318,8 +389,8 @@ const UI = (() => {
        the quad builder that runs immediately before the draw call. Nothing sits
        between the sample and the paint. */
     sampleCursor(t) {
-      const r = this.session.refill;
-      if (!r || !r.open || r.finished) return;
+      const r = this.activeInv();
+      if (!r || !r.open) return;
       if (this.settings.invCursor !== 'drawn') return;
       const dt = Math.max(1, Math.min(64, t - (this.lastCursorT || t - 16)));
       this.lastCursorT = t;
@@ -342,9 +413,9 @@ const UI = (() => {
     }
 
     openInventory(open) {
-      const r = this.session.refill;
-      if (!r || r.finished) return;
-      r.setOpen(open);
+      const r = this.activeInv();
+      if (!r) return;
+      if (r.setOpen) r.setOpen(open); else r.open = open;
       const drawn = this.settings.invCursor === 'drawn';
       if (open) {
         this.cursor = { x: innerWidth / 2, y: innerHeight / 2 };
@@ -386,8 +457,11 @@ const UI = (() => {
     setMode(mode) {
       this.mode = mode;
       this.session.setMode(mode);
-      this.session.player.hotbar = this.settings.hotbar.slice();
-      this.session.player.slot = 0;
+      // freeplay's hotbar comes from the kit you packed, not the drill layout
+      if (mode !== 'freeplay') {
+        this.session.player.hotbar = this.settings.hotbar.slice();
+        this.session.player.slot = 0;
+      }
       $('mode-title').textContent = MODES[mode].title;
       $('mode-desc').textContent = MODES[mode].desc;
       document.title = 'Crystal trainer — ' + MODES[mode].title;
@@ -492,8 +566,8 @@ const UI = (() => {
 
       document.addEventListener('mousemove', e => {
         if (document.pointerLockElement !== canvas) return;
-        const r = s.refill;
-        if (r && r.open && !r.finished) {
+        const r = this.activeInv();
+        if (r && r.open) {
           if (!this.rawSupported) this.accumulate(e);
           return;                                 // camera stays put while in the menu
         }
@@ -541,8 +615,8 @@ const UI = (() => {
           e.preventDefault();
           return;
         }
-        const rf = s.refill;
-        if (rf && !rf.finished && (document.pointerLockElement || rf.open)) {
+        const rf = this.activeInv();
+        if (rf && (document.pointerLockElement || rf.open)) {
           if (e.code === this.settings.keys.inventory) {
             this.openInventory(!rf.open);
             e.preventDefault();
@@ -552,8 +626,10 @@ const UI = (() => {
             if (rf.open) {
               const hit = this.slotUnderCursor();
               if (hit) rf.swapOffhand(hit.kind, hit.index);
-            } else rf.swapHeldOffhand(s.player.slot);
+            } else if (rf.swapHeldOffhand) rf.swapHeldOffhand(s.player.slot);
+            else s.swapOffhand();
             this.updateInventory();
+            this.buildHotbar();
             e.preventDefault();
             return;
           }
@@ -563,17 +639,11 @@ const UI = (() => {
                 const hit = this.slotUnderCursor();
                 if (hit) rf.hotbarKey(hit.kind, hit.index, i);
                 this.updateInventory();
+                this.buildHotbar();
                 e.preventDefault();
                 return;
               }
           }
-        }
-        if (this.mode === 'freeplay' && document.pointerLockElement &&
-            e.code === this.settings.keys.offhand && !e.repeat) {
-          s.swapOffhand();
-          this.buildHotbar();
-          e.preventDefault();
-          return;
         }
         if (document.pointerLockElement) {
           s.keys.add(e.code);
@@ -601,20 +671,24 @@ const UI = (() => {
       // system-cursor mode: the OS pointer's own coordinates feed the same
       // arithmetic hit test the drawn cursor uses
       document.addEventListener('mousemove', e => {
-        const r = s.refill;
-        if (!r || !r.open || r.finished) return;
+        const r = this.activeInv();
+        if (!r || !r.open) return;
         if (this.settings.invCursor === 'drawn') return;
         this.drawn.x = e.clientX; this.drawn.y = e.clientY;
       });
       document.addEventListener('mousedown', e => {
-        const r = s.refill;
-        if (!r || !r.open || r.finished) return;
+        const r = this.activeInv();
+        if (!r || !r.open) return;
         if (this.settings.invCursor === 'drawn') return;
         e.preventDefault();
-        r.clicks++;
+        if (r.clicks !== undefined) r.clicks++;
         const hit = this.invSlotAt(e.clientX, e.clientY);
-        if (hit) { r.clickHits++; r.click(hit.kind, hit.index, e.shiftKey); }
+        if (hit) {
+          if (r.clickHits !== undefined) r.clickHits++;
+          r.click(hit.kind, hit.index, e.shiftKey);
+        }
         this.updateInventory();
+        this.buildHotbar();
       });
 
       for (const b of document.querySelectorAll('.mode'))
@@ -630,6 +704,7 @@ const UI = (() => {
         });
 
       this.bindMultiplayer();
+      this.bindKitScreen();
 
       $('score-again').addEventListener('click', e => {
         e.stopPropagation();
@@ -707,33 +782,279 @@ const UI = (() => {
         });
         row.appendChild(sel); host.appendChild(row);
       };
-      const toggle = (label, key) => {
+      const toggle = (label, key, after) => {
         const row = document.createElement('label');
         row.className = 'row';
         row.innerHTML = '<span>' + label + '</span>';
         const input = document.createElement('input');
         input.type = 'checkbox'; input.checked = !!s[key]; input.disabled = locked;
-        input.addEventListener('change', () => { s[key] = input.checked; save(s); });
+        input.addEventListener('change', () => {
+          s[key] = input.checked; save(s); if (after) after();
+        });
         row.appendChild(input); host.appendChild(row);
       };
       select('Arena floor', 'roomArena', [['stone', 'Stone — craters'], ['bedrock', 'Bedrock — never craters']]);
       select('Arena size', 'roomSize', [[24, '24 × 24'], [32, '32 × 32'], [48, '48 × 48'], [60, '60 × 60']]);
       toggle('Allow double blast protection', 'roomDoubleBP');
-      toggle('Auto totem', 'roomAutoTotem');
-      // this one is yours, not the room's, so it stays editable after connecting
-      const row = document.createElement('label');
-      row.className = 'row';
-      row.innerHTML = '<span>Your totems per life</span>';
-      const inp = document.createElement('input');
-      inp.type = 'range'; inp.min = 1; inp.max = 36; inp.step = 1; inp.value = s.freeplayTotems;
-      const out = document.createElement('b');
-      const show = () => out.textContent = inp.value;
-      inp.addEventListener('input', () => { s.freeplayTotems = +inp.value; show(); save(s); });
-      show();
-      row.appendChild(inp); row.appendChild(out); host.appendChild(row);
+      toggle('Auto totem', 'roomAutoTotem', () => this.buildRoomForm());
+      /* Lives only exist under auto totem. Without it the totem in your hand
+         is consumed like any other item and the inventory is the limit, so a
+         separate number would be a second answer to the same question. */
+      if (s.roomAutoTotem) {
+        const row = document.createElement('label');
+        row.className = 'row';
+        row.innerHTML = '<span>Lives (pops before you die)</span>';
+        const inp = document.createElement('input');
+        inp.type = 'range'; inp.min = 1; inp.max = 30; inp.step = 1; inp.value = s.freeplayLives;
+        inp.disabled = locked;
+        const out = document.createElement('b');
+        const show = () => out.textContent = inp.value;
+        inp.addEventListener('input', () => { s.freeplayLives = +inp.value; show(); save(s); });
+        show();
+        row.appendChild(inp); row.appendChild(out); host.appendChild(row);
+      } else {
+        const note = document.createElement('p');
+        note.className = 'note';
+        note.style.margin = '8px 0 0';
+        note.textContent = 'Totems are consumed on use and your inventory starts full. '
+          + 'Turn on auto totem to fight with a life count instead.';
+        host.appendChild(note);
+      }
+    }
+
+    /* ------------------------------------------------------------------
+       The kit screen.
+
+       Shown once the link is up, because until then there is nothing to pack
+       for. What you lay out here is what you spawn with and what you are
+       handed back on every respawn — no top-ups, no hidden reserve. The draft
+       deliberately does not persist: a kit you did not choose this session is
+       a kit you would be surprised by. Saved kits persist, by name, because
+       those you did choose.
+       ------------------------------------------------------------------ */
+    blankDraft() {
+      return { grid: new Array(27).fill(null), hotbar: new Array(9).fill(null), offhand: null };
+    }
+
+    standardDraft() {
+      const d = this.blankDraft();
+      d.hotbar = ['sword', 'crystal', 'obsidian', 'pickaxe', 'crossbow',
+                  'gapple', 'pearl', 'anchor', 'totem'];
+      d.offhand = 'totem';
+      for (let i = 0; i < 12; i++) d.grid[i] = 'totem';
+      return d;
+    }
+
+    openKitScreen() {
+      if (!this.kitDraft) this.kitDraft = this.standardDraft();
+      $('kits').classList.add('open');
+      const room = this.peer && this.peer.room;
+      $('kit-room').textContent = room
+        ? room.size + '\u00b2 ' + (room.arena === 'bedrock' ? 'bedrock' : 'stone') +
+          (room.autoTotem ? ' \u00b7 auto totem' : '')
+        : 'connected';
+      this.buildKitEditor();
+    }
+
+    /* One slot element. Every slot is both a drag source and a drop target,
+       which is what makes rearranging feel like an inventory rather than a
+       form. Click-to-pick is kept alongside it: dragging is fiddly on a
+       trackpad and the click path costs nothing. */
+    kitSlotEl(kind, index, item, label) {
+      const d = document.createElement('div');
+      d.className = 'kit-slot' + (kind === 'off' ? ' off' : '') +
+        (kind === 'pal' ? ' pal' : '') + (item ? ' filled' : '') +
+        (this.kitPick && this.kitPick.kind === kind && this.kitPick.index === index ? ' sel' : '');
+      d.title = item ? ITEMS[item].label : 'empty';
+      d.draggable = !!item;
+      const sw = document.createElement('i');
+      if (item) sw.style.background = ITEMS[item].col;
+      d.appendChild(sw);
+      if (label !== undefined) {
+        const u = document.createElement('u');
+        u.textContent = label;
+        d.appendChild(u);
+      }
+      d.addEventListener('dragstart', e => {
+        e.dataTransfer.effectAllowed = 'copyMove';
+        e.dataTransfer.setData('text/plain', kind + ':' + index);
+      });
+      d.addEventListener('dragover', e => { e.preventDefault(); d.classList.add('drop'); });
+      d.addEventListener('dragleave', () => d.classList.remove('drop'));
+      d.addEventListener('drop', e => {
+        e.preventDefault();
+        d.classList.remove('drop');
+        const raw = e.dataTransfer.getData('text/plain');
+        if (!raw) return;
+        const [fk, fi] = raw.split(':');
+        this.kitMove(fk, +fi, kind, index);
+      });
+      d.addEventListener('click', e => {
+        e.stopPropagation();
+        this.kitClick(kind, index);
+      });
+      return d;
+    }
+
+    draftGet(kind, i) {
+      const d = this.kitDraft;
+      if (kind === 'pal') return KIT_PALETTE[i];
+      if (kind === 'hot') return d.hotbar[i];
+      if (kind === 'off') return d.offhand;
+      return d.grid[i];
+    }
+
+    draftSet(kind, i, v) {
+      const d = this.kitDraft;
+      if (kind === 'pal') return;                 // the palette is a source only
+      if (kind === 'hot') d.hotbar[i] = v || null;
+      else if (kind === 'off') d.offhand = v || null;
+      else d.grid[i] = v || null;
+    }
+
+    /* From the palette this copies; anywhere else it swaps. Dropping onto the
+       palette deletes, which is how you take something back out. */
+    kitMove(fromKind, fromIndex, toKind, toIndex) {
+      const item = this.draftGet(fromKind, fromIndex);
+      if (!item) return;
+      if (toKind === 'pal') {
+        if (fromKind !== 'pal') this.draftSet(fromKind, fromIndex, null);
+      } else if (fromKind === 'pal') {
+        this.draftSet(toKind, toIndex, item);
+      } else {
+        const there = this.draftGet(toKind, toIndex);
+        this.draftSet(toKind, toIndex, item);
+        this.draftSet(fromKind, fromIndex, there);
+      }
+      this.kitPick = null;
+      this.buildKitEditor();
+    }
+
+    kitClick(kind, index) {
+      if (!this.kitPick) {
+        if (this.draftGet(kind, index)) this.kitPick = { kind, index };
+        else if (kind !== 'pal') { this.draftSet(kind, index, null); }
+        this.buildKitEditor();
+        return;
+      }
+      const from = this.kitPick;
+      if (from.kind === kind && from.index === index) { this.kitPick = null; this.buildKitEditor(); return; }
+      this.kitMove(from.kind, from.index, kind, index);
+    }
+
+    buildKitEditor() {
+      const d = this.kitDraft;
+      if (!d) return;
+
+      const pal = $('kit-palette');
+      pal.innerHTML = '';
+      pal.addEventListener('dragover', e => e.preventDefault());
+      for (let i = 0; i < KIT_PALETTE.length; i++)
+        pal.appendChild(this.kitSlotEl('pal', i, KIT_PALETTE[i]));
+
+      const grid = $('kit-grid');
+      grid.innerHTML = '';
+      for (let i = 0; i < 27; i++)
+        grid.appendChild(this.kitSlotEl('inv', i, d.grid[i]));
+
+      const bar = $('kit-hotbar');
+      bar.innerHTML = '';
+      for (let i = 0; i < 9; i++)
+        bar.appendChild(this.kitSlotEl('hot', i, d.hotbar[i], String(i + 1)));
+
+      const off = $('kit-off');
+      off.replaceWith(Object.assign(this.kitSlotEl('off', 0, d.offhand, 'off'), { id: 'kit-off' }));
+
+      this.buildSavedKits();
+
+      const totems = [...d.grid, ...d.hotbar, d.offhand].filter(x => x === 'totem').length;
+      const auto = this.peer && this.peer.room && this.peer.room.autoTotem;
+      const parts = [];
+      if (this.kitPick) parts.push('holding ' + ITEMS[this.draftGet(this.kitPick.kind, this.kitPick.index)].label);
+      parts.push(totems + (totems === 1 ? ' totem packed' : ' totems packed'));
+      if (auto) parts.push('auto totem is on, so one is enough — lives are the limit');
+      else if (totems === 0) parts.push('with none, the first lethal hit kills you');
+      $('kit-status').textContent = parts.join('  \u00b7  ');
+      $('kit-status').className = 'mp-status' + (!auto && totems === 0 ? ' err' : '');
+    }
+
+    buildSavedKits() {
+      const host = $('kit-saved');
+      host.innerHTML = '';
+      const saved = this.settings.savedKits || [];
+      if (!saved.length) {
+        const em = document.createElement('span');
+        em.className = 'note';
+        em.textContent = 'None yet — lay one out and save it.';
+        host.appendChild(em);
+        return;
+      }
+      saved.forEach((k, i) => {
+        const chip = document.createElement('button');
+        chip.className = 'kit-chip';
+        const b = document.createElement('b');
+        b.textContent = k.name;
+        const x = document.createElement('span');
+        x.textContent = '\u00d7';
+        x.title = 'delete';
+        chip.appendChild(b); chip.appendChild(x);
+        chip.addEventListener('click', e => {
+          e.stopPropagation();
+          if (e.target === x) {
+            this.settings.savedKits.splice(i, 1);
+            save(this.settings);
+          } else {
+            this.kitDraft = {
+              grid: (k.grid || []).slice(), hotbar: (k.hotbar || []).slice(), offhand: k.offhand || null
+            };
+            while (this.kitDraft.grid.length < 27) this.kitDraft.grid.push(null);
+            while (this.kitDraft.hotbar.length < 9) this.kitDraft.hotbar.push(null);
+            this.kitPick = null;
+          }
+          this.buildKitEditor();
+        });
+        host.appendChild(chip);
+      });
+    }
+
+    bindKitScreen() {
+      $('kit-go').addEventListener('click', e => {
+        e.stopPropagation();
+        this.session.setKit(this.kitDraft);
+        $('kits').classList.remove('open');
+        this.setMode('freeplay');
+        if (this.peer) this.peer.sendEvent({ t: 'ready' });
+      });
+      $('kit-clear').addEventListener('click', e => {
+        e.stopPropagation();
+        this.kitDraft = this.blankDraft();
+        this.kitPick = null;
+        this.buildKitEditor();
+      });
+      $('kit-fill').addEventListener('click', e => {
+        e.stopPropagation();
+        this.kitDraft = this.standardDraft();
+        this.kitPick = null;
+        this.buildKitEditor();
+      });
+      $('kit-save').addEventListener('click', e => {
+        e.stopPropagation();
+        const name = ($('kit-name').value || '').trim();
+        if (!name) { $('kit-name').focus(); return; }
+        const d = this.kitDraft;
+        this.settings.savedKits = this.settings.savedKits || [];
+        const entry = { name, grid: d.grid.slice(), hotbar: d.hotbar.slice(), offhand: d.offhand };
+        const at = this.settings.savedKits.findIndex(k => k.name === name);
+        if (at >= 0) this.settings.savedKits[at] = entry;
+        else this.settings.savedKits.push(entry);
+        save(this.settings);
+        $('kit-name').value = '';
+        this.buildKitEditor();
+      });
     }
 
     bindMultiplayer() {
+
       const setTab = (tab) => {
         for (const b of document.querySelectorAll('.mp-tab'))
           b.classList.toggle('active', b.dataset.tab === tab);
@@ -804,7 +1125,7 @@ const UI = (() => {
             grid.appendChild(a); grid.appendChild(b);
           }
           $('mp-step-room').style.display = '';
-          this.mpStatus('These are the owner\'s settings. They apply to both of you.');
+          this.mpStatus('These are the owner\'s settings. You pack your own kit after connecting.');
         } catch (err) { this.mpFail(err); }
       });
 
@@ -848,9 +1169,10 @@ const UI = (() => {
         this.session.interpDelay = this.settings.interpDelay;
         $('mp').classList.remove('open');
         $('mp-leave').style.display = '';
-        this.setMode('freeplay');
         this.mpStatus('Connected.', 'ok');
         $('net-arena').textContent = room.size + '² ' + (room.arena === 'bedrock' ? 'bedrock' : 'stone');
+        // packing comes before spawning; the arena waits
+        this.openKitScreen();
       } else if (state === 'stalled') {
         this.mpStatus(detail, 'err');
         this.showDiag(this.peer.report());
@@ -882,6 +1204,8 @@ const UI = (() => {
       this.peer = null;
       this.pendingRoom = null;
       this.session.detachNet();
+      $('kits').classList.remove('open');
+      this.kitDraft = null;
       $('mp-leave').style.display = 'none';
       $('mp-step-code').style.display = 'none';
       $('mp-step-room').style.display = 'none';
@@ -917,6 +1241,19 @@ const UI = (() => {
         hm.classList.add(s.lastHitCrit ? 'crit' : 'show');
       }
 
+      // the pop consumes the totem in a tick, not in a click, so nothing would
+      // otherwise repaint the slot it just left
+      const sig = p.hotbar.join(',') + '|' + p.offhand + '|' + p.slot + '|' +
+        p.grid.join(',') + '|' + p.lives;
+      if (sig !== this.kitSig) { this.kitSig = sig; this.buildHotbar(); }
+
+      const cb = $('crossbow');
+      const isBow = p.held === 'crossbow';
+      cb.classList.toggle('on', isBow && p.alive);
+      cb.classList.toggle('loaded', p.crossbowLoaded);
+      $('crossbow-fill').style.width =
+        (p.crossbowCharge / MC.CROSSBOW_CHARGE_TICKS * 100).toFixed(1) + '%';
+
       if (s.popEvents !== this.seenFreeplayPops) {
         this.seenFreeplayPops = s.popEvents;
         const el = $('totem-pop');
@@ -940,6 +1277,9 @@ const UI = (() => {
       $('bar-abs').style.width = Math.min(100, p.absorption / 20 * 100).toFixed(1) + '%';
       $('hp-num').textContent = hp.toFixed(1) +
         (p.absorption > 0 ? ' +' + p.absorption.toFixed(1) : '');
+      $('bar-food').style.width = (p.food / 20 * 100).toFixed(1) + '%';
+      $('bar-sat').style.width = (Math.min(p.food, p.saturation) / 20 * 100).toFixed(1) + '%';
+      $('food-num').textContent = p.food + (p.food <= MC.SPRINT_FOOD_MIN ? '  no sprint' : '');
       const host = $('effects');
       const fx = p.effects.list();
       const key = fx.map(e => e.id + e.amp + Math.ceil(e.ticks / 20)).join('|');
@@ -963,7 +1303,7 @@ const UI = (() => {
       $('net-ping').textContent = (p && p.rtt !== null) ? Math.round(p.rtt) + ' ms' : '—';
       $('net-loss').textContent = p ? (p.lossRate() * 100).toFixed(1) + '%' : '—';
       $('net-deaths').textContent = s.remoteDeaths + ' \u2013 ' + s.deaths;
-      let peerText = 'waiting';
+      let peerText = s.peerReady ? 'packed' : 'packing kit';
       for (const rp of s.remotes.values()) if (rp.present) peerText = 'in arena';
       $('net-peer').textContent = p && p.ready ? peerText : '—';
     }

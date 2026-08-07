@@ -191,6 +191,44 @@
   .mp-status{min-height:20px;font-size:12px;color:var(--dim);margin:14px 0 0}
   .mp-status.err{color:#e07a7a}
 
+  /* ---- kit editor ---- */
+  .kit-hint{font-size:12px;color:var(--dim);margin:2px 0 12px;line-height:1.5}
+  .kit-pal{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:16px}
+  .kit-row{display:flex;align-items:center;gap:14px}
+  body.left-hand .kit-row{flex-direction:row-reverse}
+  .kit-bar{display:flex;gap:4px}
+  .kit-slot{width:40px;height:40px;border:1px solid var(--line);border-radius:6px;
+            background:rgba(21,18,28,.85);position:relative;cursor:pointer;flex:none}
+  .kit-slot:hover{border-color:var(--crystal)}
+  .kit-slot.off{border-style:dashed}
+  .kit-slot.sel{border-color:var(--crystal);box-shadow:0 0 0 1px var(--crystal)}
+  .kit-slot i{position:absolute;inset:8px;border-radius:3px;display:none}
+  .kit-slot.filled i{display:block}
+  .kit-slot u{position:absolute;left:0;right:0;top:-13px;font-size:9px;color:var(--dim);
+              text-decoration:none;font-family:var(--mono);text-align:center}
+  #kits{position:fixed;inset:0;z-index:7;display:none;align-items:flex-start;
+        justify-content:center;background:rgba(8,6,12,.92);backdrop-filter:blur(3px);
+        overflow-y:auto;padding:24px 0}
+  #kits.open{display:flex}
+  .kit-panel{width:min(600px,94vw)}
+  .kit-grid{display:grid;grid-template-columns:repeat(9,40px);gap:4px;margin-bottom:4px}
+  .kit-slot.drop{border-color:var(--crystal);background:rgba(176,111,208,.22)}
+  .kit-slot.pal{cursor:grab}
+  .kit-saved{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;min-height:26px}
+  .kit-chip{display:flex;align-items:center;gap:6px;font:inherit;font-size:12px;
+            color:var(--ink);background:var(--panel-2);border:1px solid var(--line);
+            border-radius:6px;padding:4px 8px;cursor:pointer}
+  .kit-chip:hover{border-color:var(--crystal)}
+  .kit-chip b{font-weight:500}
+  .kit-chip span{color:var(--dim);font-family:var(--mono);font-size:14px;line-height:1}
+  .kit-savebar{display:flex;gap:6px;margin-bottom:22px}
+  .kit-savebar input{flex:1;font:inherit;font-size:13px;color:var(--ink);
+                     background:var(--panel-2);border:1px solid var(--line);
+                     border-radius:6px;padding:6px 9px}
+  .kit-savebar input:focus{outline:none;border-color:var(--crystal)}
+  .kit-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;
+            margin-top:18px;font-size:12px;color:var(--dim)}
+
   /* ---- vitals ---- */
   #vitals{left:50%;bottom:70px;transform:translateX(-50%);text-align:center;z-index:2}
   .bars{display:flex;align-items:center;gap:9px;justify-content:center}
@@ -200,6 +238,18 @@
          transition:width .09s linear}
   #bar-hp{background:linear-gradient(#e05a5a,#b83232);width:100%}
   #bar-abs{background:linear-gradient(#e8c860,#c9a227);width:0}
+  /* AppleSkin-style: saturation is the thin overlay sitting on the food bar,
+     because it is the buffer that drains before the visible bar moves */
+  #bar-food{background:linear-gradient(#c98a3e,#9c6524);width:100%}
+  #bar-sat{background:#f0c46a;height:3px;bottom:auto;top:0;width:100%;opacity:.9}
+  .bar.food{height:9px}
+  #vitals .bar.food + b{color:var(--dim)}
+  #crossbow{position:fixed;left:50%;top:calc(50% + 24px);transform:translateX(-50%);
+            width:66px;height:3px;border-radius:2px;background:rgba(10,8,14,.7);
+            z-index:3;pointer-events:none;opacity:0;overflow:hidden}
+  #crossbow.on{opacity:1}
+  #crossbow i{display:block;height:100%;width:0;background:#8a6a42}
+  #crossbow.loaded i{background:#7fd6a4;width:100%}
   #vitals b{font-family:var(--mono);font-size:12px;color:var(--ink);
             min-width:52px;text-align:left;font-variant-numeric:tabular-nums}
   #effects{display:flex;gap:5px;justify-content:center;margin-top:6px;min-height:17px}
@@ -326,11 +376,16 @@
     <div class="bar"><i id="bar-hp"></i><i id="bar-abs"></i></div>
     <b id="hp-num">20.0</b>
   </div>
+  <div class="bars" style="margin-top:5px">
+    <div class="bar food"><i id="bar-food"></i><i id="bar-sat"></i></div>
+    <b id="food-num">20</b>
+  </div>
   <div id="effects"></div>
 </div>
 
 <div id="atk"><i id="atk-fill"></i></div>
 <div id="hitmark"></div>
+<div id="crossbow"><i id="crossbow-fill"></i></div>
 <div id="death"><div id="death-text">You died</div></div>
 
 <div class="hud" id="equipped">
@@ -444,6 +499,41 @@
     <div class="row-btns">
       <button class="btn" id="mp-close">Back</button>
       <button class="btn" id="mp-leave" style="display:none">Leave room</button>
+    </div>
+  </div>
+</div>
+
+<div id="kits">
+  <div class="panel kit-panel">
+    <h1>Pack your kit — <em id="kit-room">connected</em></h1>
+    <p class="kit-hint">Drag items in, or click one and click a slot. What you pack is
+       exactly what you spawn with, and exactly what you get back each time you die.
+       Nothing refills itself.</p>
+
+    <p class="caption">saved kits</p>
+    <div class="kit-saved" id="kit-saved"></div>
+    <div class="kit-savebar">
+      <input id="kit-name" type="text" placeholder="name this kit" maxlength="24">
+      <button class="btn" id="kit-save">Save</button>
+    </div>
+
+    <p class="caption">available items — drag from here</p>
+    <div class="kit-pal" id="kit-palette"></div>
+
+    <p class="caption">inventory</p>
+    <div class="kit-grid" id="kit-grid"></div>
+
+    <p class="caption">hotbar and offhand</p>
+    <div class="kit-row">
+      <div class="kit-slot off" id="kit-off"><i></i><u>off</u></div>
+      <div class="kit-bar" id="kit-hotbar"></div>
+    </div>
+
+    <p class="mp-status" id="kit-status"></p>
+    <div class="row-btns">
+      <button class="btn primary" id="kit-go">Enter arena</button>
+      <button class="btn" id="kit-fill">Fill with a standard kit</button>
+      <button class="btn" id="kit-clear">Clear</button>
     </div>
   </div>
 </div>

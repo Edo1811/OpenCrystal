@@ -72,8 +72,36 @@ const Game = (() => {
         { x0: -0.07, y0: -0.16, z0: -0.03, x1: 0.07, y1: 0.42, z1: 0.03, col: [0.62, 0.60, 0.66] },
         { x0: -0.05, y0: 0.42, z0: -0.03, x1: 0.05, y1: 0.54, z1: 0.03, col: [0.72, 0.70, 0.76] }
       ], rx: -14, ry: 12, rz: -34, scale: 0.62
+    },
+    pickaxe: {
+      boxes: [
+        { x0: -0.05, y0: -0.52, z0: -0.04, x1: 0.05, y1: 0.30, z1: 0.04, col: [0.36, 0.28, 0.22] },
+        { x0: -0.26, y0: 0.30, z0: -0.05, x1: 0.26, y1: 0.40, z1: 0.05, col: [0.42, 0.38, 0.46] },
+        { x0: -0.34, y0: 0.22, z0: -0.04, x1: -0.20, y1: 0.32, z1: 0.04, col: [0.50, 0.46, 0.54] },
+        { x0: 0.20, y0: 0.22, z0: -0.04, x1: 0.34, y1: 0.32, z1: 0.04, col: [0.50, 0.46, 0.54] }
+      ], rx: -14, ry: 12, rz: -34, scale: 0.60
+    },
+    crossbow: {
+      boxes: [
+        { x0: -0.06, y0: -0.30, z0: -0.05, x1: 0.06, y1: 0.26, z1: 0.05, col: [0.42, 0.31, 0.21] },
+        { x0: -0.34, y0: 0.18, z0: -0.04, x1: 0.34, y1: 0.26, z1: 0.04, col: [0.30, 0.24, 0.18] },
+        { x0: -0.34, y0: 0.06, z0: -0.03, x1: -0.26, y1: 0.20, z1: 0.03, col: [0.55, 0.50, 0.44] },
+        { x0: 0.26, y0: 0.06, z0: -0.03, x1: 0.34, y1: 0.20, z1: 0.03, col: [0.55, 0.50, 0.44] }
+      ], rx: -8, ry: 18, rz: -12, scale: 0.62
+    },
+    gapple: {
+      boxes: [
+        { x0: -0.19, y0: -0.19, z0: -0.19, x1: 0.19, y1: 0.16, z1: 0.19, col: [0.93, 0.76, 0.24] },
+        { x0: -0.04, y0: 0.16, z0: -0.04, x1: 0.04, y1: 0.30, z1: 0.04, col: [0.34, 0.26, 0.14] }
+      ], rx: 8, ry: 24, rz: 0, scale: 0.52
     }
   };
+
+  /* Blast resistance already lives in mc.js; hardness is what breaking needs,
+     and the two are different numbers for the same block. */
+  const BLOCK_NAME = ['air', 'bedrock', 'stone', 'obsidian', 'glowstone', 'respawn_anchor'];
+  function hardnessOf(id) { return MC.HARDNESS[BLOCK_NAME[id]] ?? 0; }
+  const PICK_MINEABLE = new Set([STONE, OBSIDIAN, ANCHOR]);
 
   // ---------------------------------------------------------------- world
   class World {
@@ -90,8 +118,11 @@ const Game = (() => {
     get(x, y, z) { return this.inside(x, y, z) ? this.data[this.idx(x, y, z)] : (y < 0 ? BEDROCK : AIR); }
     set(x, y, z, v) {
       if (!this.inside(x, y, z)) return;
-      if (this.data[this.idx(x, y, z)] === ANCHOR && v !== ANCHOR)
-        this.charges.delete(x + ',' + y + ',' + z);
+      // a charge belongs to an anchor, so anything that is not one clears it.
+      // Checking the outgoing block instead would leave a stale charge behind
+      // whenever the two clients resolved a blast and a charge in a different
+      // order, and the next anchor placed there would inherit it.
+      if (v !== ANCHOR) this.charges.delete(x + ',' + y + ',' + z);
       this.data[this.idx(x, y, z)] = v;
       const cx = x / CHUNK | 0, cy = y / CHUNK | 0, cz = z / CHUNK | 0;
       this.dirty.add(cx + ',' + cy + ',' + cz);
@@ -328,6 +359,17 @@ const Game = (() => {
     return d;
   }
 
+  /* A crossbow bolt. Remote ones are drawn and fall, but never land a hit —
+     the shooter decides that, same rule as pearls. */
+  class Arrow {
+    constructor(x, y, z, vx, vy, vz, remote) {
+      this.x = x; this.y = y; this.z = z;
+      this.vx = vx; this.vy = vy; this.vz = vz;
+      this.alive = true; this.age = 0;
+      this.remote = !!remote;
+    }
+  }
+
   class Pearl {
     /* A remote pearl is drawn and flies, but never teleports anyone and never
        sets off a crystal. Its thrower owns both of those, and their client
@@ -391,7 +433,16 @@ const Game = (() => {
       this.fallDistance = 0;
       this.deadUntil = 0;
       this.regenTimer = 0;
-      this.totems = 0;
+      this.grid = new Array(27).fill(null);
+      this.lives = 0;
+      this.food = 20;
+      this.saturation = 20;
+      this.exhaustion = 0;
+      this.starveTimer = 0;
+      this.foodRegenTimer = 0;
+      this.eatTicks = 0;
+      this.crossbowCharge = 0;
+      this.crossbowLoaded = false;
     }
     get box() { return box(this.x, this.y, this.z, MC.PLAYER_W, MC.PLAYER_H); }
     get eye() { return { x: this.x, y: this.y + MC.PLAYER_EYE, z: this.z }; }
@@ -507,6 +558,104 @@ const Game = (() => {
      holding both again, so the fast route (hotbar key in the inventory, then
      F to shove it across) costs the same number of actions as the slow one.
      --------------------------------------------------------------------- */
+  /* ---------------------------------------------------------------------
+     The freeplay inventory.
+
+     Nothing drops and nothing is scarce except totems, so this is not a
+     container — it is a palette plus one finite stack. The top row hands out
+     endless copies of every kit item; the totem slot has a real count and is
+     the only thing you can exhaust. Putting an item back on the palette
+     destroys it, which is the honest way to say "this is a source, not
+     storage" without inventing a bin to throw things into.
+     --------------------------------------------------------------------- */
+  const KIT_ITEMS = ['sword', 'pickaxe', 'crossbow', 'pearl', 'obsidian',
+                     'crystal', 'anchor', 'glowstone', 'gapple'];
+  const TOTEM_SLOT = 18;
+
+  class Kit {
+    constructor(session) {
+      this.s = session;
+      this.cursor = null;
+      this.open = false;
+    }
+
+    get(kind, i) {
+      const p = this.s.player;
+      if (kind === 'hot') return p.hotbar[i];
+      if (kind === 'off') return p.offhand;
+      return p.grid[i] || null;
+    }
+
+    /* Every slot holds one item. Nothing here is a stack and nothing is a
+       source: what you brought in is what there is. */
+    count() { return 1; }
+
+    set(kind, i, v) {
+      const p = this.s.player;
+      if (kind === 'hot') { p.hotbar[i] = v; return; }
+      if (kind === 'off') { p.offhand = v; return; }
+      p.grid[i] = v;
+    }
+
+    isSource() { return false; }
+
+    take(kind, i) {
+      const it = this.get(kind, i);
+      if (!it) return null;
+      this.set(kind, i, null);
+      return it;
+    }
+
+    totemsLeft() {
+      const p = this.s.player;
+      return p.grid.filter(x => x === 'totem').length
+        + (p.offhand === 'totem' ? 1 : 0)
+        + p.hotbar.filter(x => x === 'totem').length;
+    }
+
+    click(kind, i, shift) {
+      if (shift) return this.quickMove(kind, i);
+      const held = this.cursor;
+      if (held === null) { this.cursor = this.take(kind, i); return; }
+      if (this.isSource(kind, i)) { this.set(kind, i, held); this.cursor = null; return; }
+      const there = this.get(kind, i);
+      this.set(kind, i, held);
+      this.cursor = there;
+    }
+
+    /* Shift-click sends a palette item to the offhand if it is empty and the
+       first free hotbar slot otherwise, and pulls a carried item back off. */
+    quickMove(kind, i) {
+      const p = this.s.player;
+      const it = this.get(kind, i);
+      if (!it) return;
+      if (kind === 'inv') {
+        if (p.offhand === null) { p.offhand = this.take(kind, i); return; }
+        const free = p.hotbar.indexOf(null);
+        if (free >= 0) p.hotbar[free] = this.take(kind, i);
+        return;
+      }
+      const taken = this.take(kind, i);
+      const free = p.grid.indexOf(null);
+      if (free >= 0) p.grid[free] = taken; else this.set(kind, i, taken);
+    }
+
+    hotbarKey(kind, i, slot) {
+      const p = this.s.player;
+      if (kind === 'hot' && i === slot) return;
+      const there = p.hotbar[slot];
+      p.hotbar[slot] = this.get(kind, i);
+      this.set(kind, i, there);
+    }
+
+    swapOffhand(kind, i) {
+      const p = this.s.player;
+      const there = p.offhand;
+      p.offhand = this.get(kind, i);
+      this.set(kind, i, there);
+    }
+  }
+
   class Refill {
     constructor(session) { this.s = session; this.reset(); }
 
@@ -689,6 +838,11 @@ const Game = (() => {
       this.deathAt = -1e9;
       this.totemPopAt = -1e9; this.remotePopAt = -1e9;
       this.lastHitAt = -1e9; this.lastHitCrit = false;
+      this.arrows = [];
+      this.breakKey = null; this.breakTicks = 0; this.breakNeed = 0;
+      this.kit = null;
+      this.kitSpec = null;
+      this.peerReady = false;
       // ---- presentation state. None of this feeds back into the simulation:
       // the tilt, the shake and the particles are readouts you can feel.
       this.particles = [];
@@ -762,6 +916,8 @@ const Game = (() => {
       this.refill = this.mode === 'refill' ? new Refill(this) : null;
       this.posHistory.length = 0;
       this.player.loadout = this.combat ? this.playerLoadout() : MC.loadout(2);
+      this.arrows.length = 0;
+      this.clearBreak();
       if (this.combat) {
         this.player.health = 20; this.player.absorption = 0;
         this.player.effects.clear();
@@ -818,7 +974,10 @@ const Game = (() => {
             break;
           }
           case 'ac':
-            this.world.charges.set(m.x + ',' + m.y + ',' + m.z, m.n);
+            // if the anchor is already gone here, the charge has nothing to
+            // attach to — their blast simply reached us first
+            if (this.world.get(m.x, m.y, m.z) === ANCHOR)
+              this.world.charges.set(m.x + ',' + m.y + ',' + m.z, m.n);
             break;
           case 'cp': {
             if (this.findCrystal(m.id)) break;
@@ -834,12 +993,16 @@ const Game = (() => {
           case 'pt':
             this.pearls.push(new Pearl(m.x, m.y, m.z, m.vx, m.vy, m.vz, true));
             break;
+          case 'ar':
+            this.arrows.push(new Arrow(m.x, m.y, m.z, m.vx, m.vy, m.vz, true));
+            break;
           case 'hit': {
             // their swing, my arithmetic
             this.hurtPlayer(m.raw, 'melee', {
               strength: m.base, dirX: m.dirX, dirZ: m.dirZ,
               fromX: m.fromX, fromZ: m.fromZ
             });
+            for (const e of m.effects || []) this.applyEffect(e.id, e.amp, e.ticks);
             if (m.bonus > 0) {
               const p = this.player, lo = p.loadout;
               const vel = MC.applyKnockback({ x: p.vx, y: p.vy, z: p.vz },
@@ -856,6 +1019,9 @@ const Game = (() => {
           }
           case 'die':
             this.remoteDeaths++;
+            break;
+          case 'ready':
+            this.peerReady = true;
             break;
           case 'rs':
             this.reset(true);
@@ -923,6 +1089,7 @@ const Game = (() => {
       p.health -= dealt;
       this.selfDamageLast = applied;
       this.stats.selfDamage += applied;
+      this.addExhaustion(MC.EXHAUSTION.damage);
       this.hurtFrom(kb && kb.fromX !== undefined ? kb.fromX : p.x,
         p.y, kb && kb.fromZ !== undefined ? kb.fromZ : p.z, applied);
 
@@ -939,18 +1106,26 @@ const Game = (() => {
 
     /* Health has run out. A totem in either hand turns that into one point and
        three effects; nothing in hand turns it into a death. */
+    /* Two different scarcities, and only one applies at a time.
+
+       Auto totem off: the totem in your hand is consumed, exactly as in game,
+       and you die when you have none left to hold. The inventory is the limit.
+
+       Auto totem on: the totem is never consumed, so the inventory cannot be
+       the limit — the life counter is. You die on the pop that spends the
+       last one. */
     lethal() {
       const p = this.player;
       const hand = p.totemHand();
-      if (hand) {
-        if (!(this.room && this.room.autoTotem)) {
-          if (hand === 'main') p.hotbar[p.slot] = null; else p.offhand = null;
-          p.totems = Math.max(0, p.totems - 1);
-        }
+      if (!hand) { this.die(); return; }
+      if (this.room && this.room.autoTotem) {
+        if (p.lives <= 0) { this.die(); return; }
+        p.lives--;
         this.popTotem();
         return;
       }
-      this.die();
+      if (hand === 'main') p.hotbar[p.slot] = null; else p.offhand = null;
+      this.popTotem();
     }
 
     popTotem() {
@@ -999,12 +1174,201 @@ const Game = (() => {
 
     /* A fresh kit. Everything is infinite except totems, so the only thing
        with a count is the one thing you can run out of. */
+    /* The kit you packed, handed back exactly as packed — on spawn and on
+       every respawn after it. Nothing is added and nothing is topped up: if
+       you brought two totems, you get two totems, and when they are gone the
+       next lethal hit is a death. */
+    setKit(spec) {
+      const grid = (spec.grid || []).slice(0, 27);
+      const hotbar = (spec.hotbar || []).slice(0, 9);
+      while (grid.length < 27) grid.push(null);
+      while (hotbar.length < 9) hotbar.push(null);
+      this.kitSpec = { grid, hotbar, offhand: spec.offhand || null };
+      if (this.combat) this.giveKit();
+    }
+
     giveKit() {
       const p = this.player;
-      p.hotbar = (this.settings.hotbar || DEFAULT_HOTBAR).slice();
-      p.offhand = 'totem';
+      const spec = this.kitSpec;
+      p.hotbar = spec ? spec.hotbar.slice() : DEFAULT_HOTBAR.slice();
+      p.grid = spec ? spec.grid.slice() : new Array(27).fill(null);
+      p.offhand = spec ? spec.offhand : 'totem';
       p.slot = 0;
-      p.totems = this.settings.freeplayTotems || 16;
+      const auto = !!(this.room && this.room.autoTotem);
+      p.lives = auto ? Math.max(1, this.settings.freeplayLives || 8) : 0;
+      p.food = 20; p.saturation = 20; p.exhaustion = 0;
+      p.starveTimer = 0; p.foodRegenTimer = 0; p.eatTicks = 0;
+      p.crossbowCharge = 0; p.crossbowLoaded = false;
+      this.kit = new Kit(this);
+    }
+
+    /* ------------------------------------------------------------------
+       Hunger. Exhaustion is a hidden accumulator: it fills to four, then
+       spends one point of saturation, and only once saturation is gone does
+       the visible food bar start dropping. That is why the saturation overlay
+       matters — it is the buffer you are actually burning.
+       ------------------------------------------------------------------ */
+    addExhaustion(amount) {
+      const p = this.player;
+      if (!this.combat || !p.alive) return;
+      p.exhaustion += amount;
+      while (p.exhaustion >= MC.EXHAUSTION_PER_POINT) {
+        p.exhaustion -= MC.EXHAUSTION_PER_POINT;
+        if (p.saturation > 0) p.saturation = Math.max(0, p.saturation - 1);
+        else p.food = Math.max(0, p.food - 1);
+      }
+    }
+
+    tickHunger() {
+      const p = this.player;
+      if (!p.alive) return;
+      // saturated regen is fast and cheap to trigger, so a fed player heals
+      // between exchanges — which is exactly what gapples are for
+      if (p.health < 20 && p.food >= MC.REGEN_FOOD_MIN) {
+        const fast = p.food >= 20 && p.saturation > 0;
+        const every = fast ? MC.REGEN_FAST_TICKS : MC.REGEN_SLOW_TICKS;
+        if (++p.foodRegenTimer >= every) {
+          p.foodRegenTimer = 0;
+          p.health = Math.min(20, p.health + 1);
+          this.addExhaustion(MC.REGEN_EXHAUSTION);
+        }
+      } else p.foodRegenTimer = 0;
+
+      if (p.food <= 0) {
+        if (++p.starveTimer >= MC.STARVE_TICKS) {
+          p.starveTimer = 0;
+          this.hurtPlayer(1, 'starve', null);
+        }
+      } else p.starveTimer = 0;
+    }
+
+    canSprint() {
+      const p = this.player;
+      return !this.combat || p.food > MC.SPRINT_FOOD_MIN;
+    }
+
+    /* Eating is a hold, not a press: let go early and nothing happens. */
+    tickEating() {
+      const p = this.player;
+      const eating = this.mouse.right && p.held === 'gapple' && p.alive;
+      if (!eating) { p.eatTicks = 0; return; }
+      if (++p.eatTicks < MC.EAT_TICKS) return;
+      p.eatTicks = 0;
+      p.food = Math.min(20, p.food + MC.GAPPLE_FOOD);
+      p.saturation = Math.min(p.food, p.saturation + MC.GAPPLE_SATURATION);
+      for (const e of MC.GAPPLE_EFFECTS) this.applyEffect(e.id, e.amp, e.ticks);
+      this.swingAt = performance.now();
+      // gapples are infinite, so nothing is consumed — only the time is
+    }
+
+    /* Hold right to wind the crossbow, release to keep it loaded, press again
+       to loose. The charge is the cost; the shot itself is instant. */
+    tickCrossbow() {
+      const p = this.player;
+      if (p.held !== 'crossbow' || !p.alive) { p.crossbowCharge = 0; return; }
+      if (p.crossbowLoaded) { p.crossbowCharge = MC.CROSSBOW_CHARGE_TICKS; return; }
+      if (this.mouse.right) {
+        if (++p.crossbowCharge >= MC.CROSSBOW_CHARGE_TICKS) p.crossbowLoaded = true;
+      } else p.crossbowCharge = 0;
+    }
+
+    fireCrossbow() {
+      const p = this.player;
+      if (!p.crossbowLoaded) return false;
+      p.crossbowLoaded = false;
+      p.crossbowCharge = 0;
+      const d = this.lookVector(), e = p.eye;
+      const vx = d.x * MC.ARROW_SPEED + p.vx;
+      const vy = d.y * MC.ARROW_SPEED + p.vy;
+      const vz = d.z * MC.ARROW_SPEED + p.vz;
+      this.arrows.push(new Arrow(e.x, e.y - 0.1, e.z, vx, vy, vz));
+      this.netSend({ t: 'ar', x: e.x, y: e.y - 0.1, z: e.z, vx, vy, vz });
+      this.swingAt = performance.now();
+      return true;
+    }
+
+    tickArrows() {
+      const solid = (x, y, z) => this.world.solid(x, y, z);
+      for (const a of this.arrows) {
+        if (!a.alive) continue;
+        if (++a.age > 200) { a.alive = false; continue; }
+        const nx = a.x + a.vx, ny = a.y + a.vy, nz = a.z + a.vz;
+        if (!a.remote) {
+          for (const rp of this.remotes.values()) {
+            if (!rp.present || rp.dead) continue;
+            if (rayBox(a.x, a.y, a.z, a.vx, a.vy, a.vz, rp.box) >= 0) {
+              a.alive = false;
+              this.arrowHit(rp);
+              break;
+            }
+          }
+          if (!a.alive) continue;
+          for (const c of this.crystals) {
+            if (!c.alive) continue;
+            if (rayBox(a.x, a.y, a.z, a.vx, a.vy, a.vz, c.box) >= 0) {
+              a.alive = false; this.detonate(c); break;
+            }
+          }
+          if (!a.alive) continue;
+        }
+        if (MC.rayObstructed(a.x, a.y, a.z, nx, ny, nz, solid)) { a.alive = false; continue; }
+        a.x = nx; a.y = ny; a.z = nz;
+        a.vx *= MC.ARROW_DRAG; a.vz *= MC.ARROW_DRAG;
+        a.vy = a.vy * MC.ARROW_DRAG - MC.ARROW_GRAVITY;
+      }
+      this.arrows = this.arrows.filter(a => a.alive);
+    }
+
+    arrowHit(rp) {
+      const p = this.player;
+      const dirX = p.x - rp.x, dirZ = p.z - rp.z;
+      this.netSend({
+        t: 'hit', tick: this.netTick, raw: MC.ARROW_DAMAGE, crit: false,
+        dirX, dirZ, base: 0.4, bonus: 0, fromX: p.x, fromZ: p.z,
+        effects: [{ id: 'slow_falling', amp: 0, ticks: MC.ARROW_SLOWFALL_TICKS }]
+      });
+      this.stats.totalDamage += MC.ARROW_DAMAGE;
+      this.lastHitAt = performance.now();
+      this.lastHitCrit = false;
+    }
+
+    /* ------------------------------------------------------------------
+       Block breaking. Progress lives on the target, so looking away and back
+       starts over — the same as the game.
+       ------------------------------------------------------------------ */
+    tickBreaking() {
+      const p = this.player;
+      if (!this.combat || !p.alive || !this.mouse.left) { this.clearBreak(); return; }
+      const tb = this.targetBlock();
+      const ent = this.targetEntity();
+      // an entity in front of the block means you are attacking, not mining
+      if (!tb || (ent && ent.dist < (tb.dist === undefined ? 99 : tb.dist))) {
+        this.clearBreak();
+        return;
+      }
+      const key = tb.x + ',' + tb.y + ',' + tb.z;
+      if (key !== this.breakKey) { this.breakKey = key; this.breakTicks = 0; }
+      const id = this.world.get(tb.x, tb.y, tb.z);
+      const hardness = hardnessOf(id);
+      if (hardness < 0) { this.clearBreak(); return; }
+      const pick = p.held === 'pickaxe';
+      const speed = pick
+        ? MC.PICKAXE_SPEED + MC.efficiencyBonus(this.settings.efficiencyLevel ?? 5)
+        : 1;
+      const need = MC.breakTicks(hardness, speed, pick && PICK_MINEABLE.has(id));
+      this.breakNeed = need;
+      if (++this.breakTicks >= need) {
+        this.world.set(tb.x, tb.y, tb.z, AIR);
+        this.world.charges.delete(key);
+        this.netSend({ t: 'bs', x: tb.x, y: tb.y, z: tb.z, id: AIR });
+        this.addExhaustion(MC.EXHAUSTION.attack);
+        this.clearBreak();
+      }
+    }
+
+    clearBreak() { this.breakKey = null; this.breakTicks = 0; this.breakNeed = 0; }
+    get breakProgress() {
+      return this.breakNeed ? Math.min(1, this.breakTicks / this.breakNeed) : 0;
     }
 
     /* Where I was on a given tick. An explosion arrives stamped with the tick
@@ -1133,6 +1497,7 @@ const Game = (() => {
       this.stats.totalDamage += raw;
       this.lastHitAt = performance.now();
       this.lastHitCrit = crit;
+      this.addExhaustion(MC.EXHAUSTION.attack);
       if (sprintHit) { p.vx *= 0.6; p.vz *= 0.6; p.sprinting = false; }
     }
 
@@ -1532,8 +1897,8 @@ const Game = (() => {
       const strafeIn = dead ? 0 : (this.keys.has(s.keys.left) ? 1 : 0) - (this.keys.has(s.keys.right) ? 1 : 0);
       p.sneaking = this.keys.has(s.keys.sneak);
       const sprintHeld = this.keys.has(s.keys.sprint) || this.sprintLatch;
-      if (sprintHeld && forward > 0 && !p.sneaking) p.sprinting = true;
-      if (forward <= 0) { p.sprinting = false; this.sprintLatch = false; }
+      if (sprintHeld && forward > 0 && !p.sneaking && this.canSprint()) p.sprinting = true;
+      if (forward <= 0 || !this.canSprint()) { p.sprinting = false; this.sprintLatch = false; }
 
       const slip = p.onGround ? MC.SLIP_GROUND : MC.SLIP_AIR;
       const f = slip * MC.AIR_MOMENTUM;
@@ -1554,6 +1919,7 @@ const Game = (() => {
 
       if (!dead && this.keys.has(s.keys.jump) && p.onGround) {
         p.vy = MC.JUMP_V;
+        this.addExhaustion(p.sprinting ? MC.EXHAUSTION.sprintJump : MC.EXHAUSTION.jump);
         if (p.sprinting) {
           const yr = p.yaw * Math.PI / 180;
           p.vx -= Math.sin(yr) * MC.SPRINT_JUMP_BOOST;
@@ -1562,8 +1928,12 @@ const Game = (() => {
       }
 
       const wasAir = !p.onGround;
-      const preY = p.y;
+      const preY = p.y, preX = p.x, preZ = p.z;
       moveEntity(this.world, p, MC.PLAYER_W, MC.PLAYER_H);
+      // charged per block actually travelled, not per tick held: walking into
+      // a wall costs nothing, which is how the game does it
+      if (this.combat && p.sprinting)
+        this.addExhaustion(Math.hypot(p.x - preX, p.z - preZ) * MC.EXHAUSTION.sprintPerBlock);
       // fall distance accumulates only while descending, and lands with you
       if (this.combat) {
         if (p.onGround) {
@@ -1579,12 +1949,14 @@ const Game = (() => {
       // the same friction value drives acceleration and the post-move drag,
       // which is what keeps top speed on 4.317 / 5.612 m/s
       p.vx *= f; p.vz *= f;
-      const grav = (this.combat && p.effects.has('slow_falling'))
-        ? MC.SLOW_FALL_GRAVITY : MC.GRAVITY;
+      const grav = MC.gravityFor(this.combat && p.effects.has('slow_falling'), p.vy);
       p.vy = (p.vy - grav) * MC.VDRAG;
       if (Math.abs(p.vx) < 0.003) p.vx = 0;
       if (Math.abs(p.vz) < 0.003) p.vz = 0;
       if (p.y < -5) { p.x = p.spawn.x; p.y = p.spawn.y; p.z = p.spawn.z; p.vx = p.vy = p.vz = 0; }
+
+      this.tickArrows();
+      this.tickBreaking();
 
       // ---- combat upkeep
       if (this.combat) {
@@ -1597,6 +1969,9 @@ const Game = (() => {
             p.regenTimer = MC.regenInterval(p.effects.amp('regeneration'));
           }
         }
+        this.tickHunger();
+        this.tickEating();
+        this.tickCrossbow();
         if (!p.alive && this.tick >= p.deadUntil) this.respawn();
         if (p.y < -5 && p.alive) this.hurtPlayer(1000, 'fall', null);
       }
@@ -1721,6 +2096,15 @@ const Game = (() => {
       }
       const held = p.held;
       const holdRepeat = this.mouse.right && this.tick - p.lastUseTick >= MC.USE_COOLDOWN_TICKS;
+      // the crossbow and the gapple are holds, not places: neither goes through
+      // the block-placement path below
+      if (this.combat && (p.held === 'crossbow' || p.held === 'gapple')) {
+        if (this.mouse.rightQueued > 0) {
+          this.mouse.rightQueued = 0;
+          if (p.held === 'crossbow' && p.crossbowLoaded) this.fireCrossbow();
+        }
+        return;
+      }
       if (this.mouse.rightQueued > 0 || holdRepeat) {
         if (this.mouse.rightQueued > 0) this.mouse.rightQueued--;
         let used = false;
@@ -1805,6 +2189,10 @@ const Game = (() => {
       if (isOffhand) mirror = -mirror;
       const swing = isOffhand ? 1
         : Math.max(0, Math.min(1, (now - this.swingAt) / 300));
+      // eating: the apple is brought in toward the mouth and shaken, which is
+      // the whole read on whether a bite is actually happening
+      const eating = !isOffhand && this.player.eatTicks > 0;
+      const chew = eating ? Math.sin(this.player.eatTicks * 1.1) : 0;
       const active = swing > 0 && swing < 1;
       const s1 = active ? Math.sin(Math.sqrt(swing) * Math.PI) : 0;
       const dx = active ? -0.26 * s1 * mirror : 0;
@@ -1812,10 +2200,14 @@ const Game = (() => {
       const dz = active ? -0.20 * Math.sin(swing * Math.PI) : 0;
       const rad = d => d * Math.PI / 180;
       const drop = isOffhand ? -0.10 : 0;
-      let m = R.mat4Translate(0.46 * mirror + dx, -0.44 + dy + drop, -0.70 + dz);
+      const ex = eating ? -0.16 * mirror : 0;
+      const ey = eating ? 0.14 + chew * 0.03 : 0;
+      const ez = eating ? 0.18 : 0;
+      let m = R.mat4Translate(0.46 * mirror + dx + ex, -0.44 + dy + drop + ey,
+        -0.70 + dz + ez);
       m = R.mat4Multiply(m, R.mat4RotateZ(rad((shape.rz + s1 * 14) * mirror)));
       m = R.mat4Multiply(m, R.mat4RotateY(rad(shape.ry * mirror)));
-      m = R.mat4Multiply(m, R.mat4RotateX(rad(shape.rx - s1 * 52)));
+      m = R.mat4Multiply(m, R.mat4RotateX(rad(shape.rx - s1 * 52 + chew * 12)));
       m = R.mat4Multiply(m, R.mat4Scale(shape.scale));
       return m;
     }
@@ -1873,6 +2265,43 @@ const Game = (() => {
         boxes.push({ x0: rp.x - ms, y0: top + 0.34, z0: rp.z - ms,
           x1: rp.x + ms, y1: top + 0.34 + ms * 2, z1: rp.z + ms,
           col: [0.69 + pulse * 0.2, 0.44, 0.82] });
+      }
+
+      // arrows in flight, oriented crudely along their motion
+      for (const a of this.arrows) {
+        const l = Math.hypot(a.vx, a.vy, a.vz) || 1;
+        const t = 0.045, len = 0.30;
+        boxes.push({
+          x0: a.x - Math.abs(a.vx / l) * len - t, y0: a.y - Math.abs(a.vy / l) * len - t,
+          z0: a.z - Math.abs(a.vz / l) * len - t,
+          x1: a.x + Math.abs(a.vx / l) * len + t, y1: a.y + Math.abs(a.vy / l) * len + t,
+          z1: a.z + Math.abs(a.vz / l) * len + t,
+          col: [0.86, 0.84, 0.80]
+        });
+      }
+
+      /* Breaking. No textures to crack, so the block crumbles inward: a dark
+         cube growing from the middle until it fills the space and the block
+         goes. Reads at a glance and needs no texture path. */
+      if (this.breakKey && this.breakProgress > 0) {
+        const [bx, by, bz] = this.breakKey.split(',').map(Number);
+        const k = this.breakProgress;
+        // a shell a hair outside the block, filling from the bottom up. Drawn
+        // inside the block it would be invisible, since the block is opaque.
+        const o = 0.006;
+        boxes.push({
+          x0: bx - o, y0: by - o, z0: bz - o,
+          x1: bx + 1 + o, y1: by + k * (1 + o * 2) - o, z1: bz + 1 + o,
+          col: [0.05, 0.04, 0.07]
+        });
+        // and a bright rim on the fill line so the progress is legible even
+        // against dark obsidian
+        const ry = by + k * (1 + o * 2) - o;
+        boxes.push({
+          x0: bx - o, y0: ry - 0.02, z0: bz - o,
+          x1: bx + 1 + o, y1: ry + 0.02, z1: bz + 1 + o,
+          col: [0.62, 0.56, 0.72]
+        });
       }
 
       // the other player's totem pop
@@ -2026,6 +2455,7 @@ const Game = (() => {
     }
   }
 
-  return { Session, World, Player, Dummy, Crystal, Refill, RemotePlayer,
+  return { Session, World, Player, Dummy, Crystal, Refill, RemotePlayer, Kit, Effects,
+    KIT_ITEMS, TOTEM_SLOT,
     AIR, BEDROCK, STONE, OBSIDIAN, GLOWSTONE, ANCHOR, PALETTE, SPAWNS };
 })();

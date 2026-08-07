@@ -236,7 +236,13 @@ const MC = (() => {
      spent before real health and never comes back on its own.
      --------------------------------------------------------------------- */
   const ABSORPTION_PER_LEVEL = 4;
+  /* Slow Falling swaps gravity out only while you are already moving down.
+     Applying it on the way up too would turn every jump into a moon jump,
+     which the game does not do — the effect is named for what it does. */
   const SLOW_FALL_GRAVITY = 0.01;
+  function gravityFor(slowFalling, vy) {
+    return (slowFalling && vy <= 0) ? SLOW_FALL_GRAVITY : GRAVITY;
+  }
   const FALL_SAFE_BLOCKS = 3;
 
   function regenInterval(amplifier) { return 50 >> (amplifier | 0); }
@@ -271,6 +277,64 @@ const MC = (() => {
       && charge > 0.9 && !slowFalling;
   }
   const CRIT_MULTIPLIER = 1.5;
+
+  /* ---------------------------------------------------------------------
+     Hunger.
+
+     Food and saturation are two separate pools and saturation is the one that
+     actually protects you: exhaustion eats saturation first and only starts on
+     food once saturation is gone, which is why a well-fed player can sprint a
+     long way before the visible bar moves at all. That invisible buffer is the
+     whole reason the saturation overlay is worth drawing.
+     --------------------------------------------------------------------- */
+  const EXHAUSTION_PER_POINT = 4.0;
+  const SPRINT_FOOD_MIN = 6;        // strictly greater than this to sprint
+  const REGEN_FOOD_MIN = 18;
+  const REGEN_SLOW_TICKS = 80;
+  const REGEN_FAST_TICKS = 10;
+  const REGEN_EXHAUSTION = 6.0;
+  const STARVE_TICKS = 80;
+
+  const EXHAUSTION = {
+    sprintPerBlock: 0.1,
+    jump: 0.05,
+    sprintJump: 0.2,
+    attack: 0.1,
+    damage: 0.1
+  };
+
+  // regular golden apple only — the enchanted one is a different item entirely
+  const GAPPLE_FOOD = 4;
+  const GAPPLE_SATURATION = 9.6;
+  const EAT_TICKS = 32;
+
+  const PICKAXE_DAMAGE = 6.0;
+  const PICKAXE_COOLDOWN_TICKS = 20;      // attack speed 1.0
+  const PICKAXE_SPEED = 9;                // netherite
+  function efficiencyBonus(level) { return level > 0 ? level * level + 1 : 0; }
+
+  /* Block break time in ticks. The right tool divides by 30, the wrong one by
+     100, which is what makes a pickaxe the only realistic way through
+     obsidian: 50 hardness at speed 35 is a shade over two seconds, and bare
+     handed it is not worth starting. */
+  function breakTicks(hardness, toolSpeed, correctTool) {
+    if (hardness < 0) return Infinity;                 // bedrock
+    if (hardness === 0) return 1;
+    const speed = (correctTool ? toolSpeed : 1) / hardness;
+    return Math.max(1, Math.ceil(1 / (speed / (correctTool ? 30 : 100))));
+  }
+
+  const HARDNESS = {
+    bedrock: -1, obsidian: 50, respawn_anchor: 50, stone: 1.5, glowstone: 0.3, air: 0
+  };
+
+  // ---- crossbow. No arrow items: the bow is the ammunition.
+  const CROSSBOW_CHARGE_TICKS = 25;       // 1.25 s, no Quick Charge
+  const ARROW_SPEED = 3.15;               // blocks per tick at full power
+  const ARROW_GRAVITY = 0.05;
+  const ARROW_DRAG = 0.99;
+  const ARROW_DAMAGE = 7.0;
+  const ARROW_SLOWFALL_TICKS = 200;       // 10 s of Slow Falling on the target
 
   /* ---------------------------------------------------------------------
      Self-test. Reproduces values that are independently known so a broken
@@ -330,7 +394,14 @@ const MC = (() => {
     BLAST_RESISTANCE,
     ABSORPTION_PER_LEVEL, SLOW_FALL_GRAVITY, FALL_SAFE_BLOCKS, CRIT_MULTIPLIER,
     TOTEM_EFFECTS, GAPPLE_EFFECTS,
-    regenInterval, absorptionHealth, fallDamage, isCritical,
+    regenInterval, absorptionHealth, fallDamage, isCritical, gravityFor,
+    EXHAUSTION_PER_POINT, SPRINT_FOOD_MIN, REGEN_FOOD_MIN, REGEN_SLOW_TICKS,
+    REGEN_FAST_TICKS, REGEN_EXHAUSTION, STARVE_TICKS, EXHAUSTION,
+    GAPPLE_FOOD, GAPPLE_SATURATION, EAT_TICKS,
+    PICKAXE_DAMAGE, PICKAXE_COOLDOWN_TICKS, PICKAXE_SPEED, efficiencyBonus,
+    breakTicks, HARDNESS,
+    CROSSBOW_CHARGE_TICKS, ARROW_SPEED, ARROW_GRAVITY, ARROW_DRAG,
+    ARROW_DAMAGE, ARROW_SLOWFALL_TICKS,
     explosionDamage, explosionKnockback, exposure, rayObstructed, destroyedBlocks,
     armorReduce, loadout, applyKnockback, attackCharge, chargeDamageMultiplier,
     selfTest

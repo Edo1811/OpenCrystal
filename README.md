@@ -283,7 +283,7 @@ game. `Auto totem` makes the pop free.
 |---|---|
 | Regeneration | 1 HP every `50 >> amp` ticks — 50 for I, 25 for II |
 | Absorption | `4 × level`, spent before health, never regenerates |
-| Slow Falling | gravity `0.08` → `0.01`, fall damage cancelled, **and crits disabled** |
+| Slow Falling | gravity `0.08` → `0.01` **only while descending**, fall damage cancelled, crits disabled |
 | Fall damage | `floor(distance − 3)`, armour applies but no EPF |
 
 **Crits** need the real conditions: airborne, moving downward, fall distance above zero,
@@ -319,12 +319,87 @@ per player, not per room.
 | Drills after all of it | health untouched, readout still 13.70, still double BP |
 | Stage 2 convergence, re-run | 131 actions, 0 divergence across 131 072 blocks |
 | Melee knockback, both geometries | victim moves away from the hitter, not into them |
+| Jump apex, with and without Slow Falling | 1.2522 both — the effect only slows descent |
+| Auto totem on | 8 pops, totem never leaves the offhand, dead on the ninth |
+| Auto totem off | totem consumed per pop, dead once none is left to hold |
+| Respawn after death | the packed kit returned exactly — same grid, hotbar and offhand |
+| Inventory open | cursor moves, camera does not; both resume normally on close |
+| Anchor charges | follow block identity, so a destroyed anchor cannot leave one behind |
 
-### Not wired up yet
+### Hunger
 
-Hunger, the inventory and kit screen, gapples, the pickaxe, block breaking and the
-crossbow. Everything in that list is local item behaviour that barely touches the wire,
-which is why it is a separate pass from the damage resolution above.
+Full exhaustion model, because the halves people cut are the ones that matter. Exhaustion
+is a hidden accumulator: it fills to `4.0`, spends one point of **saturation**, and only
+once saturation is gone does the visible food bar move. That invisible buffer is the whole
+reason the saturation overlay is worth drawing, so it sits on the food bar AppleSkin-style
+rather than beside it.
+
+Sprinting costs `0.1` per block **actually travelled** — running into a wall is free, same
+as in game — jumping `0.05`, sprint-jumping `0.2`, attacking and taking damage `0.1`.
+Below 7 food you cannot sprint. At 18+ you regenerate; at 20 with saturation left you
+regenerate eight times faster, which is what makes a gapple worth the 1.6 seconds.
+
+Golden apples only — regular ones. Regeneration II 5 s, Absorption I 2 min, +4 food and
++9.6 saturation. Eating is a hold: let go early and nothing happens. Notch apples are
+deliberately absent.
+
+### Tools
+
+**Pickaxe** — netherite, 6 damage, 20-tick cooldown, Efficiency V. Its real job is
+obsidian.
+
+**Breaking** is a hold, and progress lives on the target block, so looking away and back
+starts over. There are no textures to crack with, so the block crumbles inward instead: a
+dark cube growing from the middle until it fills the space and the block goes.
+
+| Block | Pickaxe, Eff V | Bare hands |
+|---|---|---|
+| Obsidian | 2.15 s | 250 s |
+| Stone | 0.10 s | 7.50 s |
+| Glowstone | 0.05 s | 1.50 s |
+| Bedrock | never | never |
+
+**Crossbow** — no arrow items; the bow is the ammunition. Hold right to wind it over 25
+ticks, and it stays loaded until you loose it. 7 damage and 10 seconds of Slow Falling on
+whoever it hits, which also **disables their crits** for the duration. A charge bar sits
+under the cooldown bar and turns green when it is loaded.
+
+### Totems and lives
+
+Two different scarcities, and only one is ever in play:
+
+**Auto totem off** — a totem is a single item in a single slot, exactly as in game. The one
+in your hand is consumed on the pop, your inventory starts full of them, and you die when
+there is none left to hold. The inventory is the limit.
+
+**Auto totem on** — the totem is never consumed, so the inventory cannot be the limit and
+stocking eighteen of them would mean nothing. The life count is the limit instead: you die
+on the pop that spends the last one. The slider only exists in this mode, because otherwise
+it would be a second answer to a question the inventory has already answered.
+
+### The kit screen
+
+Connecting opens the kit screen, not the arena — until the link is up there is nothing to
+pack for. You get the full inventory, the hotbar and the offhand, and a palette of every
+item. Drag them in, or click one and click a slot.
+
+**What you pack is what you get**, on spawn and on every respawn after it. Nothing is added
+and nothing tops itself up: bring two totems and you get two totems back each life, and
+when they run out the next lethal hit is a death. The in-game inventory holds exactly what
+you put there — there is no hidden reserve and no palette to draw from once you are in.
+
+The working layout is deliberately **not** persisted: a kit you did not choose this session
+is a kit you would be surprised by. Saved kits are, by name — those you did choose. Click a
+chip to load one.
+
+The opponent's state shows in the room card as `packing kit`, `packed`, then `in arena`.
+
+### The inventory
+
+Vanilla click semantics throughout, the same ones the refill drill uses: pick up and place,
+shift-click to quick-move, hotbar key while hovering, `F` for the offhand. The overlay is
+still drawn in the GL frame with its own cursor, so opening it mid-fight costs no pointer
+lock and no pause.
 
 ## Validation
 
