@@ -292,6 +292,11 @@ cooldown bar — 12.5 ticks for the sword, 20 for the pickaxe — updated every 
 a cooldown bar refreshed on the HUD's 80 ms cadence is worse than none. A hit tick flashes
 white, a crit flashes gold and larger.
 
+The offhand has its own slot beside the hotbar, dashed while empty and solid once
+filled, and sits on the opposite side to whichever main hand you picked. Its item is drawn
+in first person too — held lower than the main hand and, unlike it, never swinging, since
+you are not swinging it. `F` swaps.
+
 **Knockback** is the melee pair as always: `0.4` from taking damage plus
 `(kbLevel + sprint) · 0.5`. Explosion knockback is now real and follows the room's blast
 protection setting, which is what makes `Allow double BP` a genuine choice — measured on a
@@ -313,6 +318,7 @@ per player, not per room.
 | Blast rewound to its tick | 14.03 damage; the same blast stamped at *now*, 0 |
 | Drills after all of it | health untouched, readout still 13.70, still double BP |
 | Stage 2 convergence, re-run | 131 actions, 0 divergence across 131 072 blocks |
+| Melee knockback, both geometries | victim moves away from the hitter, not into them |
 
 ### Not wired up yet
 

@@ -959,6 +959,7 @@ const Game = (() => {
       p.absorption = 0;
       for (const e of MC.TOTEM_EFFECTS) this.applyEffect(e.id, e.amp, e.ticks);
       this.totemPopAt = performance.now();
+      this.popEvents = (this.popEvents || 0) + 1;
       this.stats.totemPops++;
       this.spawnTotemParticles(p.x, p.y + 1.0, p.z);
       this.netSend({ t: 'pop' });
@@ -1120,8 +1121,10 @@ const Game = (() => {
       if (crit) raw *= MC.CRIT_MULTIPLIER;
       const sprintHit = p.sprinting && charge >= MC.SPRINT_KB_CHARGE ? 1 : 0;
       const bonus = (this.settings.knockbackLevel + sprintHit) * 0.5;
-      // the vector runs from the target toward me; the formula subtracts it
-      const dirX = rp.x - p.x, dirZ = rp.z - p.z;
+      // the vector runs from the target toward me and the formula subtracts
+      // it, so it has to be attacker minus target — the other way round sends
+      // them into the swing instead of away from it
+      const dirX = p.x - rp.x, dirZ = p.z - rp.z;
       this.netSend({
         t: 'hit', tick: this.netTick, raw, crit,
         dirX, dirZ, base: 0.4, bonus, fromX: p.x, fromZ: p.z
@@ -1796,17 +1799,20 @@ const Game = (() => {
     /* Where the held item sits, and how it swings. The boxes are in item
        space; this matrix drops them into view space, so the item can sit at an
        angle without the box builder ever learning about rotation. */
-    handTransform(shape, now) {
+    handTransform(shape, now, isOffhand) {
       const R = Render;
-      const mirror = this.settings.mainHand === 'left' ? -1 : 1;
-      const swing = Math.max(0, Math.min(1, (now - this.swingAt) / 300));
+      let mirror = this.settings.mainHand === 'left' ? -1 : 1;
+      if (isOffhand) mirror = -mirror;
+      const swing = isOffhand ? 1
+        : Math.max(0, Math.min(1, (now - this.swingAt) / 300));
       const active = swing > 0 && swing < 1;
       const s1 = active ? Math.sin(Math.sqrt(swing) * Math.PI) : 0;
       const dx = active ? -0.26 * s1 * mirror : 0;
       const dy = active ? 0.14 * Math.sin(Math.sqrt(swing) * Math.PI * 2) : 0;
       const dz = active ? -0.20 * Math.sin(swing * Math.PI) : 0;
       const rad = d => d * Math.PI / 180;
-      let m = R.mat4Translate(0.46 * mirror + dx, -0.44 + dy, -0.70 + dz);
+      const drop = isOffhand ? -0.10 : 0;
+      let m = R.mat4Translate(0.46 * mirror + dx, -0.44 + dy + drop, -0.70 + dz);
       m = R.mat4Multiply(m, R.mat4RotateZ(rad((shape.rz + s1 * 14) * mirror)));
       m = R.mat4Multiply(m, R.mat4RotateY(rad(shape.ry * mirror)));
       m = R.mat4Multiply(m, R.mat4RotateX(rad(shape.rx - s1 * 52)));
@@ -1980,6 +1986,17 @@ const Game = (() => {
         this.r.setHandBoxes(null);
       }
 
+      // the offhand sits on the other side, held lower and still — it does not
+      // swing, because you are not swinging it
+      const offShape = this.combat ? HAND_SHAPES[p.offhand] : null;
+      let offMatrix = null;
+      if (st.showHand && offShape && !invOpen) {
+        this.r.setOffhandBoxes(offShape.boxes);
+        offMatrix = this.handTransform(offShape, now, true);
+      } else {
+        this.r.setOffhandBoxes(null);
+      }
+
       // ---- camera. Tilt, bob and shake move the picture only; targeting and
       // every metric still run off the raw yaw and pitch above.
       const eye = p.eye;
@@ -2005,7 +2022,7 @@ const Game = (() => {
         roll += (Math.random() * 2 - 1) * k * 20;
       }
       this.r.draw({ x: eye.x + ox, y: eye.y + oy, z: eye.z + oz },
-        p.yaw, pitch, st.fov, roll, handMatrix);
+        p.yaw, pitch, st.fov, roll, handMatrix, offMatrix);
     }
   }
 

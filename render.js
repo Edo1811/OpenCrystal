@@ -202,6 +202,7 @@ const Render = (() => {
       this.chunks = new Map();
       this.dyn = this.makeBuffer();
       this.hand = this.makeBuffer();
+      this.offhand = this.makeBuffer();
 
       const ov = gl.createProgram();
       gl.attachShader(ov, compile(gl, gl.VERTEX_SHADER, OVS));
@@ -367,7 +368,15 @@ const Render = (() => {
       this.upload(this.hand, new Float32Array(boxVerts(boxes)));
     }
 
-    draw(eye, yaw, pitch, fov, roll, handMatrix) {
+    /* The offhand gets its own buffer rather than sharing the main one: the
+       two items need different matrices, and one buffer cannot be drawn twice
+       at two angles without re-uploading it every frame. */
+    setOffhandBoxes(boxes) {
+      if (!boxes || !boxes.length) { this.offhand.count = 0; return; }
+      this.upload(this.offhand, new Float32Array(boxVerts(boxes)));
+    }
+
+    draw(eye, yaw, pitch, fov, roll, handMatrix, offMatrix) {
       const gl = this.gl, c = this.canvas;
       const w = c.clientWidth * devicePixelRatio | 0, h = c.clientHeight * devicePixelRatio | 0;
       if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
@@ -407,13 +416,21 @@ const Render = (() => {
 
       // ---- held item: own depth range so it never clips into a nearby block,
       // and a fixed 70 degree projection so the FOV slider does not warp it
-      if (this.hand.count && handMatrix) {
+      const anyHand = (this.hand.count && handMatrix) || (this.offhand.count && offMatrix);
+      if (anyHand) {
         gl.clear(gl.DEPTH_BUFFER_BIT);
         gl.uniformMatrix4fv(this.uProj, false,
           mat4Perspective(70, c.width / c.height, 0.01, 10));
-        gl.uniformMatrix4fv(this.uView, false, handMatrix);
-        gl.bindVertexArray(this.hand.vao);
-        gl.drawArrays(gl.TRIANGLES, 0, this.hand.count);
+        if (this.hand.count && handMatrix) {
+          gl.uniformMatrix4fv(this.uView, false, handMatrix);
+          gl.bindVertexArray(this.hand.vao);
+          gl.drawArrays(gl.TRIANGLES, 0, this.hand.count);
+        }
+        if (this.offhand.count && offMatrix) {
+          gl.uniformMatrix4fv(this.uView, false, offMatrix);
+          gl.bindVertexArray(this.offhand.vao);
+          gl.drawArrays(gl.TRIANGLES, 0, this.offhand.count);
+        }
       }
 
       if (this.ov.count) {

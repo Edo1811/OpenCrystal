@@ -917,6 +917,14 @@ const UI = (() => {
         hm.classList.add(s.lastHitCrit ? 'crit' : 'show');
       }
 
+      if (s.popEvents !== this.seenFreeplayPops) {
+        this.seenFreeplayPops = s.popEvents;
+        const el = $('totem-pop');
+        el.classList.remove('fire');
+        void el.offsetWidth;                       // restart the animation
+        el.classList.add('fire');
+      }
+
       $('death').classList.toggle('on', !p.alive);
       $('death-text').textContent = p.deadUntil
         ? 'Respawning in ' + Math.max(0, ((p.deadUntil - s.tick) / MC.TPS)).toFixed(1) + 's'
@@ -1192,8 +1200,17 @@ const UI = (() => {
         d.appendChild(n);
         host.appendChild(d);
       }
-      $('held-name').textContent = hb[this.session.player.slot]
-        ? ITEMS[hb[this.session.player.slot]].label : '';
+      const held = hb[this.session.player.slot];
+      // the offhand only exists in freeplay, so the slot only appears there
+      const off = $('offslot');
+      off.classList.toggle('on', this.mode === 'freeplay');
+      const offItem = this.session.player.offhand && ITEMS[this.session.player.offhand];
+      off.classList.toggle('filled', !!offItem);
+      off.querySelector('i').style.background = offItem ? offItem.col : 'transparent';
+      off.title = offItem ? offItem.label : 'empty offhand';
+      $('held-name').textContent = held
+        ? ITEMS[held].label + (offItem ? '   \u2022   ' + offItem.label + ' (offhand)' : '')
+        : (offItem ? offItem.label + ' (offhand)' : '');
     }
 
     // ------------------------------------------------------------------ hud

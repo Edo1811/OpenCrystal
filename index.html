@@ -75,6 +75,17 @@
   .slot u{position:absolute;left:4px;top:2px;font-size:9px;color:var(--dim);text-decoration:none;
           font-family:var(--mono)}
   #held-name{margin-top:8px;font-size:12px;color:var(--dim);height:16px}
+  /* the offhand sits apart from the nine, and swaps sides with the main hand */
+  #bar-row{display:flex;align-items:center;justify-content:center;gap:14px}
+  body.left-hand #bar-row{flex-direction:row-reverse}
+  .offslot{display:none;width:42px;height:42px;border:1px dashed var(--line);
+           border-radius:6px;background:rgba(21,18,28,.8);position:relative}
+  .offslot.on{display:block}
+  .offslot i{position:absolute;inset:9px;border-radius:3px;display:none}
+  .offslot.filled{border-style:solid;border-color:#4a4258}
+  .offslot.filled i{display:block}
+  .offslot u{position:absolute;left:0;right:0;top:-14px;font-size:9px;color:var(--dim);
+             text-decoration:none;font-family:var(--mono);text-align:center;letter-spacing:.08em}
 
   /* ---- overlay ---- */
   #overlay{position:fixed;inset:0;z-index:5;display:flex;align-items:center;justify-content:center;
@@ -341,7 +352,10 @@
 </div>
 
 <div class="hud" id="hud-bottom">
-  <div id="hotbar"></div>
+  <div id="bar-row">
+    <div class="offslot" id="offslot"><i></i><u>off</u></div>
+    <div id="hotbar"></div>
+  </div>
   <div id="held-name"></div>
 </div>
 
